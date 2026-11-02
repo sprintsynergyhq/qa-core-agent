@@ -5,7 +5,7 @@ It is the first thing to read in any new thread.
 
 ## What QA-Core is
 
-An autonomous QA agent (repo sardar-usman/qa-core-agent, main branch is truth).
+An autonomous QA agent (repo sprintsynergyhq/qa-core-agent, main branch is truth).
 Pipeline: Planner (Haiku) plans scenarios, Explorer (Opus 4.7) drives a real
 browser and records steps, Critic (Sonnet 4.6) grades every scenario pass /
 rework / reject with a one-pass repair for rework, Replay re-runs everything
@@ -135,8 +135,9 @@ Oct 6.
    current models (Haiku 4.5, Opus 4.7, Sonnet 4.6), logged in with a
    dedicated account the owner registered by hand (values in .env only),
    graded against the bar below. Run 7 done Oct 23, bar missed; diagnosis
-   docs/audit/run-59540f-diagnosis.md. Next: fix PR for D1 to D4 and D5's
-   cause, then run 8 with a new bar written first.
+   docs/audit/run-59540f-diagnosis.md. Fix PRs #53 to #56 merged Oct 23 to
+   29 (D1 to D7i of run 7, except D6's cause). Run 8 moves to a
+   self-hosted Toolshop; its bar is below.
 Exit bar (written Oct 6, before the run): rework rate under 35 percent on
 the first Critic pass; shipped and rules covered reported, not targeted;
 emitted-spec check green for every shipped test; zero shipped tests whose
@@ -298,15 +299,65 @@ since run 6, now disallows /auth and /checkout, so fixing D1 brings back
 the catalogue pages but not login, registration or the cart page (D7a);
 line 5 needs an owner decision on `--urls` for the /auth pages.
 
+### Run 8 bar (written Oct 29, before the run)
+
+a. Benchmark. Run 8 is the first run on a self-hosted Toolshop and starts a new baseline; runs 1 to 7 stay public-site history and are not compared line for line.
+- testsmith-io/practice-software-testing cloned at /Users/osman/Projects/toolshop-local, commit ae7caecb, SPRINT=sprint5, UI v2.5 (build 2026-10-29), started with `docker compose up -d`. The web container can exit at start-up on "host not found in upstream phpmyadmin"; `docker compose up -d web` starts it.
+- robots.txt is edited in the local copy only (sprint5/UI/src/robots.txt; the original is kept as robots.txt.orig): the Disallow lines for /auth and /checkout and the Sitemap line (it pointed at the public domain) are removed; /account and /admin stay disallowed. Reason: this is the operator's own test instance, as a client's staging site would be. QA-Core honors robots.txt unchanged (invariant 29), and the public site's file still applies there.
+- Data is re-seeded right before the run (`docker compose exec laravel-api php artisan migrate:fresh --seed`).
+- Test account: the seeded customer2 account, host-scoped as QA_CORE_TEST_USER_LOCALHOST / QA_CORE_TEST_PASS_LOCALHOST in .env (values in .env only).
+- $0 discovery check, Oct 29 (scripts/discover-site.ts with the cached map): method browser-crawl; 14 candidates (/, /category/hand-tools, /category/power-tools, /category/other, /category/special-tools, /rentals, /contact, /auth/login, three /product/<id> pages, /privacy, /auth/register, /auth/forgot-password); robotsSkipped 0; no feature kept out of reach.
+
+b. Command. Run 7's flags, SRS file and $6.00 ceiling; only the URL changes:
+
+```bash
+cd /Users/osman/Projects/Openclaw/qa-core-agent && npm run explore -- http://localhost:4200/ --srs output/practicesoftwaretesting-com/20260918T163858Z-5e4394/toolshop-srs.md --ceiling 6 --lang ts --pom --replay --stability 3 --stabilize --stabilize-attempts 3
+```
+
+Models are the defaults, with no override in the shell or .env, exactly as in run 7 part a. Planner, requirements map, page filter and feature parser: claude-haiku-4-5. Explorer: claude-opus-4-7. Critic and Stabilizer: claude-sonnet-4-6. `cost.models` on run-report.json must read exactly these; any other value voids the run as run 8.
+The requirements map is run 7's: before the run, output/practicesoftwaretesting-com/srs/ac278ddf17eb/requirements-map.json is copied to output/localhost/srs/ac278ddf17eb/requirements-map.json (same SRS bytes, same hash). So the rule ids R1 to R14 mean what they meant in run 7, the map costs $0, and the console prints "requirements map: reused".
+
+c. Preconditions. Any one failing means no run.
+- main at the PR 57 merge or later; `git status` clean.
+- `curl -sS -o /dev/null -w "%{http_code}" "http://localhost:8091/products?page=1"` prints 200.
+- `curl -s http://localhost:4200/robots.txt` shows no /auth and no /checkout line.
+- Data re-seeded right before the run.
+- `npx tsx scripts/preflight-site.ts http://localhost:4200/ --login` prints LOGIN OK right before the run.
+- `grep -n '^QA_CORE_.*MODEL' .env; env | grep '^QA_CORE_.*MODEL'` prints only QA_CORE_MODEL_TRANSCRIBE and QA_CORE_MODEL_ROUTER.
+- The copied map exists: `ls output/localhost/srs/ac278ddf17eb/requirements-map.json`.
+
+d. The bar. Graded; every file is in the run 8 folder under output/localhost/.
+1. Rework rate under 35 percent on the FIRST Critic pass, measured exactly as run 7 line 1 (numerator `review.repair` entries; denominator the verdicts in the first `critic_done` event). Two rules changed since run 7: a secondary check beside a real outcome assertion is no longer a rework reason (PR #54, D7d), and a universal word in a scenario name with no all-items or absence assertion now is one (PR #55, doctrine rule 11). Run 7: 50 percent under the old rules.
+2. Every SRS feature gets a page. In discovery.json, `candidates` carry catalogue, contact and account by page evidence (a path segment), and the cart entry of `stateProbes` reads outcome `revealed`. Run 7: only contact.
+3. Emitted-spec check green for every shipped test, and not inconclusive, as run 7 line 3. The honest measure (passed over every `emittedRun.tests` entry) is reported beside it.
+4. Zero shipped tests whose name claims more than the recording proves. Graded by hand by the advisor, as run 7 line 4. Every universal word in a name (only, all, every, each, none, no) must be backed by an all-items or absence assertion in the zip's test code. Run 7: 1.
+5. The happy login survives replay, as run 7 line 5: the replay verdict of the happy login scenario has `passed: true` and no `refused`; no such entry is a miss. Run 7: no login scenario was planned.
+6. Reported, not targeted: shipped (`reconciliation.generated`) and rules covered over 14, with the covered rules per feature. Run 7: 5 shipped, 4 of 14.
+
+e. Measured and recorded, not graded.
+- Total cost against the $6.00 ceiling, and cost per stage, as run 7 part d.
+- Wall time: the pipeline (`startedAt` to `finishedAt`) and to the zip (`run-meta.json` `writtenAt`).
+- console.log in the run folder (invariant 75): it exists, and its `Cost:` and `Rule coverage:` lines match the report.
+- `planTrimmed` (with each cut's cause) and `planSkippedPages`.
+- Every cross-page duplicate line, and which basis it used.
+- The cart probe line: from which page, whether by the item hop, which page was revealed.
+- R6 to R9: planned or not, on which page and `reachedBy`, covered or the reason.
+- All-items assertions recorded and shipped.
+- RULE 7 refusals, total.
+- `orientationCalls`.
+- D6: if a contact first-name negative is planned, its replay outcome and the observed messages in any drop reason.
+- `unzip -p <zip> '*.spec.*' | grep -c "toContainText('')"` prints 0.
+
+f. Rules for the run. One run. A missed bar is recorded as missed, never re-run to improve the number. If the run stops before the Critic (a crash, a billing error, a preflight stop), it is not graded: the cause is diagnosed at $0, and the owner decides whether a second attempt counts as run 8.
+
 ### Opus 5.5 comparison (planned; runs only if the owner approves)
 
 The run 7 command with only QA_CORE_EXPLORER_MODEL=claude-opus-5-5 set
 (in the price table, so it is not refused), same $6.00 ceiling, same SRS,
-same preconditions, the same main commit as run 7, run after run 7 is
-graded:
+same preconditions, the same main commit as run 7, run after run 8 is graded, on the local Toolshop, re-seeded first:
 
 ```bash
-cd /Users/osman/Projects/Openclaw/qa-core-agent && QA_CORE_EXPLORER_MODEL=claude-opus-5-5 npm run explore -- https://practicesoftwaretesting.com/ --srs output/practicesoftwaretesting-com/20260918T163858Z-5e4394/toolshop-srs.md --ceiling 6 --lang ts --pom --replay --stability 3 --stabilize --stabilize-attempts 3
+cd /Users/osman/Projects/Openclaw/qa-core-agent && QA_CORE_EXPLORER_MODEL=claude-opus-5-5 npm run explore -- http://localhost:4200/ --srs output/practicesoftwaretesting-com/20260918T163858Z-5e4394/toolshop-srs.md --ceiling 6 --lang ts --pom --replay --stability 3 --stabilize --stabilize-attempts 3
 ```
 
 `cost.models.explorer` must read claude-opus-5-5 and every other stage
