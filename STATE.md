@@ -5,7 +5,7 @@ It is the first thing to read in any new thread.
 
 ## What QA-Core is
 
-An autonomous QA agent (repo sardar-usman/qa-core-agent, main branch is truth).
+An autonomous QA agent (repo sprintsynergyhq/qa-core-agent, main branch is truth).
 Pipeline: Planner (Haiku) plans scenarios, Explorer (Opus 4.7) drives a real
 browser and records steps, Critic (Sonnet 4.6) grades every scenario pass /
 rework / reject with a one-pass repair for rework, Replay re-runs everything
