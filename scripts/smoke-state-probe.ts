@@ -51,7 +51,9 @@
  *      item's URL. An item page that is already a candidate takes no hop.
  *      The hop's load counts against the page cap and waits the crawl
  *      delay, robots is honored for the item page, and the emitted check's
- *      coverage rebuild gives the same robots reason.
+ *      coverage rebuild gives the same robots reason. No second hop: an
+ *      item page with no trigger that links to a related product never
+ *      follows that link, whether the hop reached it or it is a candidate.
  *   M. the same through explore() in process (a local stand-in for the
  *      Anthropic API): the run's probe hops, the item page is a planned page
  *      reached by action, R6 carries reachedBy, and rule-coverage.json reads
@@ -104,13 +106,16 @@ delete process.env.ANTHROPIC_API_KEY;
 
 /* ─── the fixture site ──────────────────────────────────────────────────── */
 
-type Variant = 'reveal' | 'no-trigger' | 'no-link' | 'robots' | 'deals' | 'spa' | 'disabled-before' | 'disabled-after' | 'click-throws' | 'cards' | 'cards-robots' | 'cards-run';
+type Variant = 'reveal' | 'no-trigger' | 'no-link' | 'robots' | 'deals' | 'spa' | 'disabled-before' | 'disabled-after' | 'click-throws' | 'cards' | 'cards-robots' | 'cards-run' | 'cards-related';
 const site = { variant: 'reveal' as Variant, hits: [] as string[], times: [] as Array<{ p: string; t: number }> };
 const PRODUCT = '/product/01HXXXXXXXXXXXXXXXXXXXXXXX';
 // An out-of-stock product: its "Add to cart" is disabled and must never be clicked.
 const PRODUCT_OOS = '/product/01HYYYYYYYYYYYYYYYYYYYYYYY';
 // The second product card of the cards variants: the hop follows the FIRST item link only.
 const PRODUCT_2 = '/product/01HZZZZZZZZZZZZZZZZZZZZZZZ';
+// A related product, linked only from the first product's page (cards-related):
+// it holds the trigger, and a second hop is the only way to reach it.
+const PRODUCT_3 = '/product/01HWWWWWWWWWWWWWWWWWWWWWWW';
 
 // The cart link is built by script with split strings, so the fetch crawl's
 // href regex never sees it in the page source (only a rendered DOM after an
@@ -157,7 +162,7 @@ function route(p: string): { status: number; type: string; body: string } {
   if (p === '/robots.txt') return { status: 200, type: 'text/plain', body: site.variant === 'robots' || site.variant === 'cards-robots' || site.variant === 'cards-run' ? 'User-agent: *\nDisallow: /checkout\n' : 'User-agent: *\nDisallow:\n' };
   // Toolshop's listing (run 59540f): a category link, then product cards whose
   // test ids carry the generated id and whose names end with the price.
-  if (p === '/' && (site.variant === 'cards' || site.variant === 'cards-robots')) {
+  if (p === '/' && (site.variant === 'cards' || site.variant === 'cards-robots' || site.variant === 'cards-related')) {
     const card = (href: string, id: string, name: string, price: string): string => `<a class="card" data-test="product-${id}" href="${href}"><h5>${name}</h5><span>${price}</span></a>`;
     return html(pageHtml('Toolshop', `<h1>Toolshop</h1><nav><a href="/category/hand-tools">Hand Tools</a></nav><h2>Products</h2>${card(PRODUCT, '01HXXXXXXXXXXXXXXXXXXXXXXX', 'Combination Pliers', '$14.15')}${card(PRODUCT_2, '01HZZZZZZZZZZZZZZZZZZZZZZZ', 'Hammer', '$12.01')}`));
   }
@@ -176,6 +181,10 @@ function route(p: string): { status: number; type: string; body: string } {
   }
   if (p === '/category/hand-tools') return html(pageHtml('Hand Tools', `<h1>Hand Tools</h1><a href="${PRODUCT}">Combination Pliers</a>`));
   if (p === PRODUCT_2) return html(pageHtml('Hammer', `<h1>Hammer</h1><button type="button" data-test="add-to-cart">Add to cart</button>`, addScript));
+  // No trigger at all on the first product (no denied control either, so the
+  // page reads "no trigger" and the hop rule is what decides), one related product.
+  if (p === PRODUCT && site.variant === 'cards-related') return html(pageHtml('Combination Pliers', `<h1>Combination Pliers</h1><p>$14.15</p><button type="button">Notify me</button><h2>Related products</h2><a href="${PRODUCT_3}">Long Nose Pliers</a>`));
+  if (p === PRODUCT_3) return html(pageHtml('Long Nose Pliers', `<h1>Long Nose Pliers</h1><button type="button" data-test="add-to-cart">Add to cart</button>`, addScript));
   if (p === '/') {
     const good = `<a href="${PRODUCT}">Combination Pliers</a><p>$14.15</p>`;
     const oos = `<a href="${PRODUCT_OOS}">Bolt Cutters</a><p>Out of stock</p>`;
@@ -767,6 +776,35 @@ console.log('\n--- the item hop ---');
   const u8 = report.ruleCoverage?.uncovered.find((x) => x.ruleId === 'R8');
   check('L26. after the emitted check rebuilds coverage, the uncited revealed-side rule reads robots-disallowed with the detail',
     u8?.reason === 'robots-disallowed' && u8.detail === `the action on ${PRODUCT} reveals /checkout, which robots.txt disallows (rule Disallow: /checkout); not loaded`, JSON.stringify(report.ruleCoverage?.uncovered));
+}
+{
+  // No second hop. The first product has no trigger and links to a related
+  // product that has one. The item page the hop reached never hops again, so
+  // the related product is never loaded and nothing is revealed.
+  site.variant = 'cards-related';
+  const { r, hits } = await probeCards([]);
+  const probe = r.probes[0];
+  const tried = (probe?.tried ?? []).map((t) => [pathOf(t.url), t.result]);
+  check('L27. the item page the hop reached reads "no trigger" and its related product is never loaded or tried',
+    JSON.stringify(tried) === JSON.stringify([['/', `no trigger; hopped to item page ${PRODUCT} by ${ITEM_CONTROL}`], [PRODUCT, 'no trigger'], ['/contact', 'no trigger']]) && !hits.includes(PRODUCT_3), JSON.stringify({ tried, hits }));
+  check('L28. the item hop happens once for the listing: one tried entry hops, from "/"',
+    (probe?.tried ?? []).filter((t) => /hopped to item page/.test(t.result)).map((t) => t.url).join() === `${base}/`, JSON.stringify(tried));
+  check('L29. no origin is an item page reached from another item page: outcome no-trigger, no origin, no hop record, nothing revealed or blocked',
+    probe?.outcome === 'no-trigger' && probe.origins.length === 0 && probe.hop === undefined && r.revealed.length === 0 && r.blocked.length === 0, JSON.stringify(probe));
+}
+{
+  // The same for an item page that is itself a crawl candidate: "/" takes no
+  // hop (an item link is a candidate), and the candidate item page, volatile,
+  // never hops to its related product either.
+  site.variant = 'cards-related';
+  site.hits = [];
+  const r = await runStateProbes({ map, candidates: [...sitemapCandidates(), { url: ITEM, source: 'crawl', volatile: true, linkedFrom: `${base}/` }], robots: { disallow: [] }, featureTokens: featureTokenMap(map), delayMs: 0, anchorWaitMs: 300, revealWaitMs: 1500, settleCapMs: 2000 });
+  const probe = r.probes[0];
+  const tried = (probe?.tried ?? []).map((t) => [pathOf(t.url), t.result]);
+  check('L30. a candidate item page with no trigger never hops to its related product: every page reads "no trigger" and the related product is never loaded',
+    JSON.stringify(tried) === JSON.stringify([['/', 'no trigger'], ['/contact', 'no trigger'], [PRODUCT, 'no trigger']]) && !site.hits.includes(PRODUCT_3), JSON.stringify({ tried, hits: site.hits }));
+  check('L31. so no origin is an item page reached from another item page: outcome no-trigger, no origin, no hop record',
+    probe?.outcome === 'no-trigger' && probe.origins.length === 0 && probe.hop === undefined && r.revealed.length === 0, JSON.stringify(probe));
 }
 /* ─── M. the item hop end to end: explore() in process (invariant 78) ───── */
 // Run 7's shape through the runtime itself: the fetch crawl finds "/" and
