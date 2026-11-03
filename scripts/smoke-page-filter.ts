@@ -7,8 +7,14 @@
  *   - parsePickResponse validates the model's pick against the input list
  *     (URL or pathname match, cap enforced, dedupe, feature tags carried)
  *
- * Pure in-code fixtures. No network. No LLM (the LLM path is exercised only
- * through its offline parser + the no-key fallback).
+ *   - K (run 71d739 D7, invariant 79): every fallback names its reason, and
+ *     a billing error from the model client (run 8 attempt 1's, verbatim) is
+ *     never a fallback: filterPages throws it, and through explore() the run
+ *     stops with the billing stop line and a checkpoint, with no
+ *     "(deterministic fallback)" line at all
+ *
+ * Pure in-code fixtures and a fake model client; section K serves a local
+ * fixture site for explore(). No request leaves the machine.
  */
 import {
   fallbackFilter,
@@ -26,6 +32,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { isVolatilePath, type DiscoveredPage } from '../src/agent/discovery.js';
 import { VOLATILE_PAGE_GUIDANCE } from '../src/agent/planner.js';
+import http from 'node:http';
+import { explore } from '../src/agent/runtime.js';
 import { EXPLORER_SYSTEM_PROMPT } from '../src/agent/runtime.js';
 import fs from 'node:fs';
 
@@ -311,6 +319,77 @@ check('H2. the token table covers product, cart, contact, login and register', [
     tagOf('/auth/login') === 'account' && tagOf('/auth/register') === 'account' && tagOf('/contact') === 'contact' && tagOf('/auth/forgot-password') === null, JSON.stringify(matched.map((m) => [m.url, m.feature])));
   check('J13. without the rule-content tokens the name "account" matches neither auth page (the old behaviour, kept as the baseline)',
     plainFeatureMatches(auth, ['account']).length === 0);
+}
+
+/* ─── K. run 71d739 D7: a fallback names its reason; billing stops the run ── */
+{
+  // Run 8 attempt 1's billing error, verbatim (output/localhost/20261102T125106Z-d2c5df events line 13).
+  const BILLING_BODY = { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' }, request_id: 'req_011Cge8fAX6nGC9NzgNUVSgH' };
+  const billingError = (): Error => Object.assign(new Error(`400 ${JSON.stringify(BILLING_BODY)}`), { status: 400, error: BILLING_BODY });
+  const throwing = (make: () => Error) => {
+    let calls = 0;
+    return { calls: () => calls, client: { messages: { create: async () => { calls++; throw make(); } } } as never };
+  };
+  const twelve: DiscoveredPage[] = Array.from({ length: 12 }, (_, i) => ({ url: `https://shop.example/section-${i}`, source: 'crawl' as const }));
+  const billing = throwing(billingError);
+  let thrown: unknown = null;
+  try { await filterPages({ pages: twelve, features: undefined, apiKey: 'fake', client: billing.client }); } catch (err) { thrown = err; }
+  check('K1. filterPages throws a billing error from its model client, never a fallback', thrown !== null && /credit balance is too low/.test((thrown as Error).message) && billing.calls() === 1, String(thrown));
+  const generic = throwing(() => new Error('socket hang up\nat Something.stack'));
+  const g = await filterPages({ pages: twelve, features: undefined, apiKey: 'fake', client: generic.client });
+  check('K2. any other model error falls back with its first line as the reason', g.method === 'fallback' && g.fallbackReason === 'socket hang up' && g.pages.length === MAX_PAGES_NO_FEATURES, JSON.stringify({ method: g.method, reason: g.fallbackReason }));
+  const noKey = await filterPages({ pages: twelve, features: undefined, apiKey: undefined });
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  check('K3. the no-key fallback names its reason', noKey.method === 'fallback' && noKey.fallbackReason === 'no API key', JSON.stringify(noKey.fallbackReason));
+  const emptyPick = { messages: { create: async () => ({ content: [{ type: 'text', text: '[]' }], usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }) } } as never;
+  const ep = await filterPages({ pages: twelve, features: undefined, apiKey: 'fake', client: emptyPick });
+  check('K4. an empty model pick names its reason', ep.method === 'fallback' && ep.fallbackReason === 'the model pick named no usable URL', JSON.stringify(ep.fallbackReason));
+
+  // Through explore(): a discovery run whose crawl finds more pages than the cap.
+  const pagesHtml = (links: string): string => `<!doctype html><html lang="en"><head><title>Shop</title></head><body><main><h1>Shop</h1><label for="q">Search</label><input id="q">${links}</main></body></html>`;
+  const sections = Array.from({ length: 9 }, (_, i) => `/section-${i}`);
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://x');
+    if (u.pathname === '/robots.txt' || u.pathname === '/sitemap.xml') { res.writeHead(404); res.end(''); return; }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(pagesHtml(u.pathname === '/' ? sections.map((p) => `<a href="${p}">${p}</a>`).join(' ') : '<a href="/">Home</a>'));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const site = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  // Nothing may leave the machine: the real client, if any stage reached it, hits a closed local port.
+  const prevBase = process.env.ANTHROPIC_BASE_URL;
+  process.env.ANTHROPIC_API_KEY = 'fixture-key-never-sent';
+  process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9';
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-page-filter-k-'));
+  const agentCwd = process.cwd();
+  process.chdir(tmp);
+  const runExplore = async (client: unknown, label: string) => {
+    const messages: string[] = [];
+    let error: Error | null = null;
+    try {
+      await explore({ url: site, language: 'ts', outDir: path.join(tmp, label), discover: true, model: 'claude-opus-4-7', maxUsd: 1, loginPreflightDone: true, skipStability: true, pageFilterClient: client as never, onEvent: (e) => { if (e.type === 'message') messages.push(e.text); } });
+    } catch (err) { error = err as Error; }
+    return { messages, error, outDir: path.join(tmp, label) };
+  };
+  try {
+    const billed = throwing(billingError);
+    const r = await runExplore(billed.client, 'billing');
+    const stop = r.messages.find((m) => m.startsWith('Run stopped: billing/credit exhaustion (400 '));
+    check('K5. through explore(): the billing error at the page filter stops the run with the billing stop line and a checkpoint',
+      billed.calls() === 1 && !!stop && stop.includes('Your credit balance is too low') && /State saved\. Resume with: npm run explore -- --resume .*checkpoint\.json$/.test(stop) && r.error?.message === stop && fs.existsSync(path.join(r.outDir, 'checkpoint.json')),
+      JSON.stringify({ calls: billed.calls(), error: r.error?.message, messages: r.messages.slice(-6) }));
+    check('K6. no "(deterministic fallback" line appears, with or without a reason, and nothing was planned', !r.messages.some((m) => m.includes('deterministic fallback')) && !r.messages.some((m) => m.startsWith('Planner')), JSON.stringify(r.messages));
+    const other = throwing(() => new Error('socket hang up'));
+    const o = await runExplore(other.client, 'other');
+    const narrowed = o.messages.find((m) => m.startsWith('discovery: ') && m.includes('narrowed to'));
+    check('K7. any other filter error still falls back, and the discovery line names the reason', narrowed === 'discovery: 10 page(s) narrowed to 5 (deterministic fallback: socket hang up)', JSON.stringify(o.messages.filter((m) => m.startsWith('discovery:'))));
+  } finally {
+    process.chdir(agentCwd);
+    if (prevBase === undefined) delete process.env.ANTHROPIC_BASE_URL; else process.env.ANTHROPIC_BASE_URL = prevBase;
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+    server.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);

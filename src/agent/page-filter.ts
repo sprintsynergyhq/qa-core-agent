@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { DiscoveredPage } from './discovery.js';
 import { costOf, UnknownModelError } from './pricing.js';
 import { stageModel } from './stage-models.js';
+import { isBillingError } from './run-errors.js';
 
 /**
  * Page relevance filter — trims a discovered page set to what is worth
@@ -240,6 +241,13 @@ export interface FilterPagesResult {
   costUsd: number;
   /** Pages that share a path template with a planned page: recorded, shown, never planned. */
   sameTemplate: DiscoveredPage[];
+  /**
+   * Why the pick fell back to the deterministic filter (invariant 79, run 8
+   * attempt 1 printed a billing error as "deterministic fallback" with no
+   * reason): no API key, no room under the cap, an empty pick, or the
+   * model error's first line. Set exactly when method is 'fallback'.
+   */
+  fallbackReason?: string;
 }
 
 /** The cap that applies for a given feature list. */
@@ -312,10 +320,10 @@ export async function filterPages(opts: FilterPagesOptions): Promise<FilterPages
   const room = Math.max(0, cap - kept.length);
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return { pages: capVolatile([...kept, ...fallbackFilter(rest, room)]), method: 'fallback', costUsd: 0, sameTemplate };
+    return { pages: capVolatile([...kept, ...fallbackFilter(rest, room)]), method: 'fallback', costUsd: 0, sameTemplate, fallbackReason: 'no API key' };
   }
   if (room === 0) {
-    return { pages: capVolatile(kept), method: 'fallback', costUsd: 0, sameTemplate };
+    return { pages: capVolatile(kept), method: 'fallback', costUsd: 0, sameTemplate, fallbackReason: `the plain feature matches fill the cap of ${cap}` };
   }
 
   const model = stageModel('pageFilter', opts.model);
@@ -346,13 +354,16 @@ export async function filterPages(opts: FilterPagesOptions): Promise<FilterPages
 
     const picked = parsePickResponse(text, rest, room);
     if (picked.length === 0) {
-      return { pages: capVolatile([...kept, ...fallbackFilter(rest, room)]), method: 'fallback', costUsd, sameTemplate };
+      return { pages: capVolatile([...kept, ...fallbackFilter(rest, room)]), method: 'fallback', costUsd, sameTemplate, fallbackReason: 'the model pick named no usable URL' };
     }
     return { pages: capVolatile([...kept, ...picked]), method: 'llm', costUsd, sameTemplate };
   } catch (err) {
-    // A model the price table does not know is never a silent $0 fallback.
-    if (err instanceof UnknownModelError) throw err;
-    return { pages: capVolatile([...kept, ...fallbackFilter(rest, room)]), method: 'fallback', costUsd: 0, sameTemplate };
+    // A model the price table does not know is never a silent $0 fallback,
+    // and a billing or credit error stops the run (invariant 79): the caller
+    // saves the checkpoint and prints the stop line.
+    if (err instanceof UnknownModelError || isBillingError(err)) throw err;
+    const first = ((err as Error)?.message ?? String(err)).split('\n')[0]!.trim() || 'unknown error';
+    return { pages: capVolatile([...kept, ...fallbackFilter(rest, room)]), method: 'fallback', costUsd: 0, sameTemplate, fallbackReason: first };
   }
 }
 

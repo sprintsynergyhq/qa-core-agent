@@ -2,7 +2,7 @@ import type { Assertion, Scenario, SelectorRecord, TraceStep } from './trace.js'
 import { ADAPTIVE_FLOOR_MS } from './adaptive-timeout.js';
 import { generatedIdFragment } from './volatile-id.js';
 import { currencyAmountIn } from './parse-number.js';
-import { typedValueForPattern } from './all-items.js';
+import { chosenOrTypedValueForPattern } from './all-items.js';
 
 /**
  * Static validation gate — runs after the Explorer closes a scenario and
@@ -51,8 +51,15 @@ import { typedValueForPattern } from './all-items.js';
  *           reworks); the steer is capture the counter's text, act,
  *           assert_compare. An all-items assertion (allItemsMatch,
  *           invariant 77) passes only when its pattern is a value the
- *           scenario typed earlier (a fill or a search term), compared
- *           case-insensitively after escaping.
+ *           scenario typed earlier (a fill or a search term) or the visible
+ *           label of a filter it checked or selected (invariant 79),
+ *           compared case-insensitively after escaping. A literal inside an
+ *           assertion's css selector (:has-text, :text, :text-is,
+ *           :text-matches, text=, or a text attribute such as [title="..."])
+ *           is judged the same way on the selector's own structure
+ *           (invariant 79, run 71d739 D1:
+ *           [data-test='product-name']:not(:has-text("Hammer"))), and read
+ *           in-run at assert time too.
  *   RULE 9: A counter is read by its text, never by its element count. A
  *           capture with source "count" on a counter target counts badge
  *           elements (0 before the add, 1 after) and proves the badge
@@ -713,12 +720,19 @@ export function counterCountCaptureReason(t: SelectorRecord, source: string): st
  */
 export function catalogueLiteralReason(a: Assertion, priorSteps: TraceStep[], knownNames?: Iterable<string>): string | null {
   const steer = 'capture the value, act, assert_compare (changed, greater, less, before, after) or assert a heading, a message, a format (assert with regex), toHaveCount with atLeast 1, or count 0 or 1';
+  // A literal inside the target's css selector is read before the expected
+  // value, on every assertion type (invariant 79, run 71d739 D1).
+  if ('target' in a) {
+    const inSelector = selectorLiteralReason(a.target);
+    if (inSelector) return inSelector;
+  }
   if (a.type === 'allItemsMatch') {
-    // Every item of a list against a pattern (invariant 77): the pattern must
-    // be a value this scenario typed (a fill or a search term), compared
+    // Every item of a list against a pattern (invariants 77 and 79): the
+    // pattern must be a value this scenario typed (a fill or a search term)
+    // or the visible label of a filter it checked or selected, compared
     // case-insensitively after escaping. Any other literal is catalogue data.
-    if (typedValueForPattern(a.pattern, priorSteps) !== null) return null;
-    return `${JSON.stringify(a.pattern)} on ${targetWords(a.target).trim()} is catalogue data that changes when the data reseeds: an all-items pattern must be a value this scenario typed earlier (a fill or a search term); ${steer}`;
+    if (chosenOrTypedValueForPattern(a.pattern, priorSteps) !== null) return null;
+    return `${JSON.stringify(a.pattern)} on ${targetWords(a.target).trim()} is catalogue data that changes when the data reseeds: an all-items pattern must be a value this scenario typed earlier (a fill or a search term) or the label of a filter it checked or selected; ${steer}`;
   }
   if (a.type === 'toHaveCount') {
     // A minimum of one is the structural "at least one card" doctrine rule 6
@@ -764,6 +778,93 @@ export function catalogueLiteralReason(a: Assertion, priorSteps: TraceStep[], kn
   const exempt = (NON_CATALOGUE_RE.test(words) || isHeadingLocator(a.target)) && !strongCatalogueLocator(a.target);
   if (!exempt && PRICE_LITERAL_RE.test(literal)) return `${JSON.stringify(literal)} is a price literal, catalogue data that changes when the data reseeds; ${steer}`;
   if (!exempt && CATALOGUE_TARGET_RE.test(words)) return `${JSON.stringify(literal)} on ${words.trim()} is catalogue data that changes when the data reseeds; ${steer}`;
+  return null;
+}
+
+/* ─────────────── Literals inside a css selector (invariant 79) ─────────────── */
+
+/**
+ * Attributes whose value is visible text, not a structural id: a literal in
+ * [title="Claw Hammer"] is the product's name, while [data-test="product-name"]
+ * or [name="email"] names where the element sits.
+ */
+const TEXT_ATTRIBUTE_RE = /^(?:title|alt|aria-label|aria-valuetext|value|placeholder|label)$/i;
+
+/** One literal found inside a css selector and the construct that holds it. */
+export interface SelectorLiteral { literal: string; where: string }
+
+/** Strip one layer of matching quotes. */
+function unquote(v: string): string {
+  const t = v.trim();
+  if (t.length >= 2 && (t[0] === '"' || t[0] === "'") && t.at(-1) === t[0]) return t.slice(1, -1);
+  return t;
+}
+
+const PSEUDO_TEXT_RE = /:(has-text|text-is|text-matches|text)\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^)]*?)\s*\)/g;
+const TEXT_ENGINE_RE = /(?:^|>>)\s*text\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^>]+?)\s*(?=>>|$)/g;
+const ATTRIBUTE_RE = /\[\s*([\w-]+)\s*[~|^$*]?=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\]\s]+)\s*(?:[is]\s*)?\]/g;
+
+/**
+ * Every text literal inside a css selector: the argument of :has-text(),
+ * :text(), :text-is() and :text-matches(), the value of a text= engine part,
+ * and the value of a text attribute ([title=...], [alt=...], [aria-label=...],
+ * [value=...], [placeholder=...], [label=...]). Structural attributes
+ * (data-test, id, class, name, type, href) are never read. Exported for the
+ * smoke.
+ */
+export function selectorLiterals(css: string): SelectorLiteral[] {
+  const out: SelectorLiteral[] = [];
+  for (const m of css.matchAll(PSEUDO_TEXT_RE)) {
+    const lit = unquote(m[2] ?? '');
+    if (lit) out.push({ literal: lit, where: `:${m[1]}()` });
+  }
+  for (const m of css.matchAll(TEXT_ENGINE_RE)) {
+    const lit = unquote(m[1] ?? '');
+    if (lit) out.push({ literal: lit, where: 'text=' });
+  }
+  for (const m of css.matchAll(ATTRIBUTE_RE)) {
+    if (!TEXT_ATTRIBUTE_RE.test(m[1] ?? '')) continue;
+    const lit = unquote(m[2] ?? '');
+    if (lit) out.push({ literal: lit, where: `[${m[1]}]` });
+  }
+  return out;
+}
+
+/** The selector with every text literal removed: what the judgement reads as the element's structure. */
+function selectorStructure(css: string): string {
+  return css
+    .replace(PSEUDO_TEXT_RE, ':$1()')
+    .replace(TEXT_ENGINE_RE, ' ')
+    .replace(ATTRIBUTE_RE, (whole, attr: string) => (TEXT_ATTRIBUTE_RE.test(attr) ? `[${attr}]` : whole));
+}
+
+/**
+ * Why a literal inside an assertion's css selector is catalogue data, or null
+ * (invariant 79). Run 71d739 shipped toHaveCount 0 on
+ * [data-test='product-name']:not(:has-text("Hammer")), which RULE 7 never
+ * read: it judged the expected value only. The literal is judged as an
+ * expected text would be, on the selector's structure with the literals
+ * removed (never the intent): a bare integer on a counter, a price on any
+ * target that is not a message, heading or field, and any literal on a
+ * product card, list item, table cell or listing. A css with no literal, or a
+ * literal on a structure that is not catalogue data (button:has-text("Login"),
+ * .alert:has-text("Invalid")), passes.
+ */
+export function selectorLiteralReason(t: SelectorRecord): string | null {
+  if (t.level !== 'css') return null;
+  const css = String(t.arg);
+  const literals = selectorLiterals(css);
+  if (literals.length === 0) return null;
+  const structure = selectorStructure(css);
+  const exempt = NON_CATALOGUE_RE.test(structure) && !STRONG_CATALOGUE_RE.test(structure);
+  const steer = 'a literal inside a selector is an expected value: capture the value, act, assert_compare, or for every item of a list a filter or search narrowed, assert allItemsMatch on the item locator with the value typed or the label checked';
+  for (const { literal, where } of literals) {
+    if (/^\s*\d+\s*$/.test(literal) && namesCounter(structure)) return `${JSON.stringify(literal)} in ${where} on ${css} is a literal count on a counter; ${COUNTER_LITERAL_STEER}`;
+    if (exempt) continue;
+    if (PRICE_LITERAL_RE.test(literal) || CATALOGUE_TARGET_RE.test(structure)) {
+      return `${JSON.stringify(literal)} in ${where} on ${css} is catalogue data that changes when the data reseeds; ${steer}`;
+    }
+  }
   return null;
 }
 

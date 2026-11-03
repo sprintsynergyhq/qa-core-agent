@@ -18,7 +18,10 @@
  *      D5): doctrine rule 11 is UNIVERSAL_CLAIM_RULE, the Critic's flagging
  *      rule 6 quotes it word for word and reworks a scenario without the
  *      all-items or count-0 assertion, and the Explorer's tool description
- *      names the all-items form.
+ *      names the all-items form. Since invariant 79 (run 71d739 D1) a count-0
+ *      absence satisfies only a none or no claim: an only, all, every or each
+ *      claim needs the all-items form, whose value may be the label of the
+ *      filter the scenario checked or selected.
  *   D. The repair review judges a fix the recording shows the page cannot
  *      satisfy as applied, "not satisfiable: the page renders ..." (D3 b).
  *
@@ -121,14 +124,24 @@ check('C2. the rule names every universal word and both assertion forms, and say
   UNIVERSAL_CLAIM_RULE.includes('(only, all, every, each, none, no)') && UNIVERSAL_CLAIM_RULE.includes('assert allItemsMatch') && UNIVERSAL_CLAIM_RULE.includes('count-0 absence assertion') && UNIVERSAL_CLAIM_RULE.includes('An assertion on the first item proves one item, not the claim.'));
 const flag6 = /\n6\. Universal claim in the name[^\n]*/.exec(CRITIC_SYSTEM_PROMPT)?.[0] ?? '';
 check('C3. the Critic\'s flagging rule 6 quotes the rule word for word and cites doctrine rule 11', flag6.includes(UNIVERSAL_CLAIM_RULE) && flag6.includes('doctrine rule 11'), flag6);
-check('C4. flagging rule 6 reworks a claim with neither assertion, with a required fix that names the all-items form',
-  flag6.includes('is "rework", with a required fix that names the form: "assert allItemsMatch on the item locator (every item, not the first) with text set to the value the scenario typed"'), flag6);
+check('C4. flagging rule 6 reworks an only, all, every or each claim with no all-items assertion, even beside a count-0 absence, with a required fix that names the all-items form and the chosen label',
+  flag6.includes('A scenario whose name makes an only, all, every or each claim and whose recording holds no all-items assertion for it is "rework", even when a count-0 absence is recorded, with a required fix that names the form: "assert allItemsMatch on the item locator (every item, not the first) with text set to the value the scenario typed or the label of the filter it checked or selected"'), flag6);
+// Run 71d739 D1 (invariant 79): the count-0 absence passed on an empty list
+// and the old text named it equal to the all-items form.
+check('C4a. the shared rule says a count-0 absence satisfies only a none or no claim, never only, all, every or each, because it passes on an empty list',
+  UNIVERSAL_CLAIM_RULE.includes('An only, all, every or each claim needs an all-items assertion') && UNIVERSAL_CLAIM_RULE.includes('A count-0 absence assertion on the items that must not appear satisfies only a none or no claim (for example "no error shown"), never an only, all, every or each claim, because it also passes on an empty list.')
+  && !UNIVERSAL_CLAIM_RULE.includes(') or a count-0 absence assertion on the items that must not appear.'), UNIVERSAL_CLAIM_RULE);
+check('C4b. the all-items value may be the visible label of the filter the scenario checked or selected, in the rule, in rule 6 and in the assert tool',
+  UNIVERSAL_CLAIM_RULE.includes('with the value the scenario typed or the visible label of the filter it checked or selected') && flag6.includes('or the label of the filter it checked or selected'));
+check('C4c. a none or no claim with neither form is still a rework, its fix naming the count-0 absence', flag6.includes('A none or no claim with neither an all-items nor a count-0 absence assertion on the items that must not appear is "rework", with a required fix naming the count-0 absence.'), flag6);
 check('C5. the Explorer and the Critic both carry doctrine rule 11 (invariant 54)', EXPLORER_SYSTEM_PROMPT.includes(rule11) && CRITIC_SYSTEM_PROMPT.includes(rule11));
 const assertTool = TOOL_DEFS.find((t) => t.name === 'assert');
 const assertDesc = assertTool?.description ?? '';
 const assertEnum = ((assertTool?.input_schema as { properties: { type: { enum: string[] } } } | undefined)?.properties.type.enum) ?? [];
 check('C6. the assert tool offers allItemsMatch and its description names it for an "only matching" or "all items" outcome',
   assertEnum.includes('allItemsMatch') && /for an "only matching" or "all items" outcome[^.]*use allItemsMatch/.test(assertDesc), assertDesc);
+check('C6a. the assert tool tells the Explorer the checked label counts, a count-0 absence never proves an only outcome, and RULE 7 reads selector literals',
+  assertDesc.includes('or the visible label of the filter you checked or selected (a category checkbox named "Hammer")') && assertDesc.includes('A count-0 absence never proves an only, all, every or each outcome: it also passes on an empty list.') && assertDesc.includes('A literal inside a css selector (:has-text, :text, text=, [title=...]) is read by RULE 7 like an expected text.'), assertDesc);
 // The line flagging rule 6 names is the line the Critic is shown: one step,
 // no separate minimum (the PR #55 review: two checks read at different
 // moments passed a list that cleared while loading).

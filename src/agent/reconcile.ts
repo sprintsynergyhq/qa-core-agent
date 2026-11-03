@@ -167,6 +167,15 @@ export function refusedNote(refused: number | undefined): string {
   return (refused ?? 0) > 0 ? ` · ${refused} refused by the wrong-password cap (not run, not counted as failed)` : '';
 }
 
+/**
+ * The console note for wrong-password scenarios stability did not re-run
+ * (invariant 79), shown apart from stable and flaked; '' when none. The CLI
+ * summary, the CLI stage line and the gateway summary all print it.
+ */
+export function credentialSkipNote(skipped: number | undefined): string {
+  return (skipped ?? 0) > 0 ? ` · ${skipped} not re-run (credential safety: wrong-password scenarios run once in replay; not counted as stable or flaky)` : '';
+}
+
 /** Each observed page message in a replay drop reason is cut at this many characters, with a visible ellipsis. */
 export const OBSERVED_MESSAGE_CAP = 160;
 
@@ -290,6 +299,9 @@ export function reconcile(report: RunReport, opts: ReconcileOptions = {}): Recon
         dropped.push({ name: v.name, stage: 'stability', reason: v.refusedReason ?? 'refused by the wrong-password cap' });
         continue;
       }
+      // Not re-run for credential safety (invariant 79): it ships on its
+      // replay pass, so it is neither stable nor a drop.
+      if (v.classification === 'skipped') continue;
       if (v.classification === 'broken') {
         broken++;
         const how = v.gaveUp ? 'Stabilizer gave up' : 'every iteration failed';
@@ -429,7 +441,7 @@ export function reconcile(report: RunReport, opts: ReconcileOptions = {}): Recon
 }
 
 /** Which stage of the pipeline left a zero-scenario run empty. */
-export type EmptyRunCause = 'planner-none' | 'explorer-none' | 'critic-gated-all' | 'replay-dropped-all';
+export type EmptyRunCause = 'planner-none' | 'explorer-none' | 'critic-gated-all' | 'replay-dropped-all' | 'halted';
 
 /**
  * Cause-specific diagnosis for a run that produced zero scenarios. The old
@@ -456,6 +468,19 @@ export function diagnoseEmptyRun(report: RunReport): { cause: EmptyRunCause; lin
     return {
       cause: 'planner-none',
       lines: ['The Planner planned 0 scenarios, so nothing was explored. The page may not have rendered its content, or it has nothing testable.'],
+    };
+  }
+  // A billing or credit error stopped the run at the Critic or the
+  // Stabilizer (invariant 79): say that, never "the explorer recorded none".
+  if (report.stopped?.haltedAt) {
+    const stage = report.stopped.haltedAt === 'critic' ? 'Critic' : 'Stabilizer';
+    const waiting = rec.incomplete.filter((i) => i.reason.includes(`the run stopped at the ${stage}`));
+    return {
+      cause: 'halted',
+      lines: [
+        `The run stopped at the ${stage} (${report.stopped.reason}): nothing after it ran, so no scenario reached the framework.`,
+        `${waiting.length} recorded scenario(s) wait in the checkpoint: ${waiting.map((i) => JSON.stringify(i.name)).join(', ')}.`,
+      ],
     };
   }
   if (recorded === 0) {

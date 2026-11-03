@@ -13,7 +13,7 @@ import { diagnoseEmptyRun } from '../agent/reconcile.js';
 import { totalCost } from '../agent/cost-total.js';
 import { createEventRenderer, ruleCoverageLines, runSummaryLines } from './render.js';
 import { deleteCheckpoint, loadCheckpoint, markCheckpointPhase, resumeHintForRun, type Checkpoint } from '../agent/checkpoint.js';
-import { emittedCheckStage, writeReportFiles } from '../agent/emitted-check.js';
+import { emittedCheckMeta, emittedCheckStage, writeReportFiles } from '../agent/emitted-check.js';
 import type { PlannedScenario } from '../agent/planner.js';
 import {
   applyCheckpointFlags, buildExploreOptions, outDirForRequest, parseExploreArgv, resumeConflicts, slugUrl, unknownModelRefusal,
@@ -443,7 +443,9 @@ async function main(): Promise<void> {
     // Checkpoint lifecycle: deleted only on a fully complete run; a stopped run keeps it for --resume.
     if (result.stopped && fs.existsSync(cpFile)) console.log(`  checkpoint:   kept at ${path.relative(process.cwd(), cpFile)} (run stopped early: ${result.stopped.reason})`);
     else deleteCheckpoint(outDir);
-    writeRunMeta(outDir, { source: 'cli', flags: runFlags(args) });
+    // A framework written without the emitted-spec check running it says so
+    // in run-meta.json too (invariant 79).
+    writeRunMeta(outDir, { source: 'cli', flags: runFlags(args), ...emittedCheckMeta(result) });
     const fin = finalizeRunDir(outDir);
     if (fin.latest) console.log(`  latest:       ${path.relative(process.cwd(), path.join(path.dirname(outDir), 'latest'))} -> ${path.basename(outDir)}`);
   } else {

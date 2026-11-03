@@ -15,7 +15,9 @@
  *
  * In-code fixtures and one child process. No network. No LLM. No browser.
  */
-import { parseVerdicts, gateByVerdicts, describeStep, renderValueForCritic, repairJson, CRITIC_SYSTEM_PROMPT, COMPARE_READING_RULES, completeVerdicts, criticMaxTokens, CRITIC_TOKENS_PER_VERDICT, CRITIC_SUMMARY_TOKENS, critique, type CriticClient } from '../src/agent/critic.js';
+import { parseVerdicts, gateByVerdicts, describeStep, renderValueForCritic, repairJson, CRITIC_SYSTEM_PROMPT, COMPARE_READING_RULES, completeVerdicts, criticMaxTokens, CRITIC_TOKENS_PER_VERDICT, CRITIC_SUMMARY_TOKENS, critique, REWORK_WITHOUT_FIX_NOTE, withReworkWithoutFix, type CriticClient, type ScenarioVerdict } from '../src/agent/critic.js';
+import { UNIVERSAL_CLAIM_RULE } from '../src/agent/doctrine.js';
+import type Anthropic from '@anthropic-ai/sdk';
 import { EXPLORER_SYSTEM_PROMPT } from '../src/agent/runtime.js';
 import { ASSERTION_DOCTRINE } from '../src/agent/doctrine.js';
 import type { SelectorRecord, TraceStep } from '../src/agent/trace.js';
@@ -450,6 +452,132 @@ check('P5. both prompts carry rules 9 and 10 word for word', [EXPLORER_SYSTEM_PR
   const clean = scripted([canonical]);
   const direct = await critique({ scenarios: two, url: 'https://x.example/', apiKey: 'fake', client: clean.client });
   check('P7. a good first response makes one call, keeps a single raw string and no warning', clean.calls() === 1 && typeof direct.raw === 'string' && direct.warnings.length === 0);
+}
+
+/* ─── S. run 71d739 D1: a count-0 absence is no answer to an "only" claim ── */
+{
+  const RUN8_SELECTOR = `[data-test='product-name']:not(:has-text("Hammer"))`;
+  const box: SelectorRecord = { level: 'role', arg: { role: 'checkbox', name: 'Hammer', exact: true }, intent: 'Hammer subcategory checkbox' };
+  const absence: TraceStep = { kind: 'assert', name: 'no non-hammer', assertion: { type: 'toHaveCount', target: { level: 'css', arg: RUN8_SELECTOR, intent: 'non-Hammer product names' }, count: 0, timeout: 10000 } };
+  const line = describeStep(absence);
+  check('S1. the Critic sees run 8\'s count-0 absence with the literal inside its selector, exactly as the spec writes it',
+    line === `assert non-Hammer product names = page.locator("[data-test='product-name']:not(:has-text(\\"Hammer\\"))") count=0 [timeout:10000ms]`, line);
+  const flag6 = /\n6\. Universal claim in the name[^\n]*/.exec(CRITIC_SYSTEM_PROMPT)?.[0] ?? '';
+  check('S2. rule 6 (the shared rule 11 text) says a count-0 absence satisfies only a none or no claim, never only, all, every or each, because it passes on an empty list',
+    flag6.includes(UNIVERSAL_CLAIM_RULE) && UNIVERSAL_CLAIM_RULE.includes('A count-0 absence assertion on the items that must not appear satisfies only a none or no claim (for example "no error shown"), never an only, all, every or each claim, because it also passes on an empty list.')
+    && flag6.includes('whose recording holds no all-items assertion for it is "rework", even when a count-0 absence is recorded'), flag6);
+  // The wire: run 8's recording through critique() with a fixture client.
+  const sent: Anthropic.MessageCreateParamsNonStreaming[] = [];
+  const name = 'filtered by Hammer subcategory and only hammers remained';
+  const fix = 'assert allItemsMatch on the item locator (every item, not the first) with text set to the value the scenario typed or the label of the filter it checked or selected';
+  const client: CriticClient = {
+    messages: {
+      create: async (params) => {
+        sent.push(params);
+        const text = JSON.stringify([{ scenario: name, verdict: 'rework', reasons: ['rule 11: "only hammers remained" is an only claim; the count-0 absence also passes on an empty list'], required_fixes: [fix] }]) + '\n<summary>one rework</summary>';
+        return { content: [{ type: 'text', text }], usage: { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as unknown as Anthropic.Message;
+      },
+    },
+  };
+  const run8: Scenario = {
+    name, category: 'happy', feature: 'catalogue',
+    steps: [
+      { kind: 'navigate', url: 'http://localhost:4200/category/hand-tools' },
+      { kind: 'capture', varName: 'cap_count', source: 'count', intent: 'product count', target: { level: 'css', arg: "[data-test='product-name']", intent: 'product names' } },
+      { kind: 'set_checked', target: box, checked: true },
+      { kind: 'assert_compare', varName: 'cap_count', readVar: 'cap_count_now', relation: 'less', source: 'count', intent: 'product count', target: { level: 'css', arg: "[data-test='product-name']", intent: 'product names' } },
+      absence,
+      { kind: 'assert', name: 'box checked', assertion: { type: 'toBeChecked', target: box, checked: true, timeout: 10000 } },
+    ],
+  };
+  const r = await critique({ scenarios: [run8], url: 'http://localhost:4200/', apiKey: 'fake', client });
+  const system = ((sent[0]?.system ?? []) as Anthropic.TextBlockParam[])[0]?.text ?? '';
+  const user = String(sent[0]?.messages[0]?.content ?? '');
+  check('S3. the first review call sends rule 6 and the count-0 line under the "only" name, and the rework naming the all-items form is kept as rework (one call, a fix listed)',
+    sent.length === 1 && system.includes(flag6) && user.includes(`[happy] ${name}`) && user.includes(line) && r.verdicts[0]?.verdict === 'rework' && r.verdicts[0]?.required_fixes[0] === fix && r.verdicts[0]?.reworkWithoutFix === undefined,
+    JSON.stringify(r.verdicts));
+}
+
+/* ─── T. run 71d739 D4: a rework that lists no required fix ─────────────── */
+{
+  // Run 8's two verdicts, verbatim from events.jsonl line 611 of
+  // output/localhost/20261102T130321Z-71d739 (docs/audit/run-71d739-diagnosis.md, D4).
+  const CONTACT = 'submitted contact form with valid first name, last name, email (with @), subject, and message';
+  const REGISTRATION = 'completed registration with all required fields filled';
+  const run8Contact: ScenarioVerdict = { scenario: CONTACT, verdict: 'rework', reasons: [
+    "The email 'jane.doe@example.com' is a hardcoded literal that could conflict with duplicate-email validation on repeated runs (rule 6). However, the contact form typically does not require unique emails, so this is likely acceptable in context.",
+    "The first-name and last-name literals ('Jane', 'Doe') are stable test values, not catalogue IDs, so they are acceptable.",
+    "The success assertion uses '.alert, [data-test=\\'contact-success\\']' — a broad selector. The count=0 on the first-name input is a reasonable proxy for form reset/navigation but is a secondary check.",
+    "The primary concern: the 'contact-form inputs after submit count=0' assertion checks that the form field disappeared (count=0) which is a valid outcome signal for form submission/navigation. The success alert visibility is also a good primary outcome. These together are acceptable.",
+    'Minor: no real issue found after careful review — the scenario is actually acceptable as written.',
+  ], required_fixes: [] };
+  const run8Registration: ScenarioVerdict = { scenario: REGISTRATION, verdict: 'rework', reasons: [
+    "The first name 'Alex', last name 'Taylor', and other personal detail literals are stable enough, but the DOB '1990-05-15', postal code '12345', house number '42', city 'Springfield', state 'IL', phone '5551234567' are all hardcoded literals that are fine as test data for a registration form.",
+    'The email uses <generated:email> and password uses <generated:password> — correct.',
+    'The URL assertion (/auth/login) after registration is a valid success signal (redirect to login after register).',
+    'However, the timeout of 15000ms is at the cap — acceptable per rule 10.',
+    'Primary concern: the assertion only checks the URL. If registration fails silently and redirects to /auth/login anyway (e.g., a duplicate-email path that happens to navigate), the assertion would still pass. A secondary assertion on a success message or registration-confirmation element would strengthen this, but per rule 9, only signals observed in recordings are required. The URL redirect is the recorded success signal — acceptable.',
+    'Actually on review this scenario passes the doctrine rules as written.',
+  ], required_fixes: [] };
+  const THIRD = 'sorted products by price low to high and prices ascended';
+  const third: ScenarioVerdict = { scenario: THIRD, verdict: 'pass', reasons: ['the sort compare is sound'], required_fixes: [] };
+  const sc = (name: string): Scenario => ({ name, category: 'happy', steps: [{ kind: 'navigate', url: 'http://localhost:4200/' }] });
+  const scenarios3 = [sc(CONTACT), sc(REGISTRATION), sc(THIRD)];
+  const respond = (verdicts: ScenarioVerdict[] | string): string => (typeof verdicts === 'string' ? verdicts : JSON.stringify(verdicts) + '\n<summary>s</summary>');
+  const scriptedCalls = (responses: string[]) => {
+    const sent: Anthropic.MessageCreateParamsNonStreaming[] = [];
+    const client: CriticClient = { messages: { create: async (params) => {
+      sent.push(params);
+      const text = responses[sent.length - 1] ?? '';
+      return { content: [{ type: 'text', text }], usage: { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as unknown as Anthropic.Message;
+    } } };
+    return { client, sent };
+  };
+  const first = respond([run8Contact, run8Registration, third]);
+
+  // T1 to T5: the kept path. The re-ask still lists no fix for either.
+  const kept = scriptedCalls([first, respond([{ ...run8Contact }, { ...run8Registration }])]);
+  const k = await critique({ scenarios: scenarios3, url: 'http://localhost:4200/', apiKey: 'fake', client: kept.client });
+  const reask = String(kept.sent[1]?.messages[0]?.content ?? '');
+  check('T1. run 8\'s two reworks with no required fix are asked again ONCE, in one call (two calls in all), the third scenario not re-sent',
+    kept.sent.length === 2 && reask.includes(`[happy] ${CONTACT}`) && reask.includes(`[happy] ${REGISTRATION}`) && !reask.includes(THIRD), `${kept.sent.length} calls`);
+  check('T2. the re-ask names the contradiction and quotes each first verdict',
+    reask.startsWith('Your previous review returned the verdict "rework" with NO required fix for the scenario(s) below. That contradicts itself:') && reask.includes(`"${CONTACT}": verdict "rework", required_fixes []`) && reask.includes('Actually on review this scenario passes the doctrine rules as written.'), reask.slice(0, 600));
+  const kc = k.verdicts.find((v) => v.scenario === CONTACT);
+  const kr = k.verdicts.find((v) => v.scenario === REGISTRATION);
+  check('T3. still no fix: both are kept as pass, marked kept, the first reasons verbatim on the mark',
+    kc?.verdict === 'pass' && kc.reworkWithoutFix?.outcome === 'kept' && JSON.stringify(kc.reworkWithoutFix.firstReasons) === JSON.stringify(run8Contact.reasons)
+    && kr?.verdict === 'pass' && kr.reworkWithoutFix?.outcome === 'kept' && JSON.stringify(kr.reworkWithoutFix.firstReasons) === JSON.stringify(run8Registration.reasons)
+    && k.verdicts.find((v) => v.scenario === THIRD)?.reworkWithoutFix === undefined, JSON.stringify(k.verdicts));
+  check('T4. the console line carries the note for each, "critic rework without a required fix; kept"',
+    REWORK_WITHOUT_FIX_NOTE === 'critic rework without a required fix; kept' && k.warnings.filter((w) => w.startsWith(`${REWORK_WITHOUT_FIX_NOTE}: "`)).length === 2 && k.warnings.some((w) => w === `${REWORK_WITHOUT_FIX_NOTE}: "${CONTACT}" (asked again once naming the contradiction; the re-ask still listed no fix)`), JSON.stringify(k.warnings));
+  const keptHistory = withReworkWithoutFix(k.verdicts, undefined) ?? [];
+  check('T5. the report marks both in review.repair: first rework, outcome kept, the note, so the first-pass rework count still holds them',
+    keptHistory.length === 2 && keptHistory.every((h) => h.first === 'rework' && h.outcome === 'kept' && h.reworkWithoutFix === true && h.second === undefined && JSON.stringify(h.notes) === JSON.stringify([REWORK_WITHOUT_FIX_NOTE])), JSON.stringify(keptHistory));
+
+  // T6 to T8: the retry path. The re-ask passes the contact form and gives the registration a fix.
+  const regFix = 'assert a registration confirmation the recording shows, beside the URL';
+  const retried = scriptedCalls([first, respond([{ scenario: CONTACT, verdict: 'pass', reasons: ['acceptable as recorded'], required_fixes: [] }, { scenario: REGISTRATION, verdict: 'rework', reasons: ['the URL alone'], required_fixes: [regFix] }])]);
+  const t = await critique({ scenarios: scenarios3, url: 'http://localhost:4200/', apiKey: 'fake', client: retried.client });
+  const tc = t.verdicts.find((v) => v.scenario === CONTACT);
+  const tr = t.verdicts.find((v) => v.scenario === REGISTRATION);
+  check('T6. the re-ask\'s own verdicts replace the contradiction: the contact form passes (retry-pass), the registration is a rework with its fix (retry-rework)',
+    retried.sent.length === 2 && tc?.verdict === 'pass' && tc.reworkWithoutFix?.outcome === 'retry-pass' && tr?.verdict === 'rework' && tr.required_fixes[0] === regFix && tr.reworkWithoutFix?.outcome === 'retry-rework', JSON.stringify(t.verdicts));
+  const retryHistory = withReworkWithoutFix(t.verdicts, [{ scenario: REGISTRATION, first: 'rework', firstReasons: tr?.reasons, second: 'pass', outcome: 'kept' }]) ?? [];
+  check('T7. both stay in review.repair: the repaired registration\'s entry is marked, the contact form gets its own entry with the re-ask\'s outcome',
+    retryHistory.length === 2 && retryHistory[0]?.scenario === REGISTRATION && retryHistory[0].reworkWithoutFix === true && retryHistory[0].second === 'pass'
+    && retryHistory[1]?.scenario === CONTACT && retryHistory[1].outcome === 'kept' && JSON.stringify(retryHistory[1].notes) === JSON.stringify(['critic rework without a required fix; the re-ask returned pass']), JSON.stringify(retryHistory));
+
+  const junk = scriptedCalls([first, 'I could not review these.']);
+  const j = await critique({ scenarios: scenarios3, url: 'http://localhost:4200/', apiKey: 'fake', client: junk.client });
+  check('T8. a re-ask that returns nothing parseable keeps both as pass with the note, no third call',
+    junk.sent.length === 2 && j.verdicts.filter((v) => v.reworkWithoutFix?.outcome === 'kept' && v.verdict === 'pass').length === 2 && j.warnings.some((w) => w.endsWith('the re-ask returned no verdict for it)')), JSON.stringify(j.warnings));
+  const clean = scriptedCalls([respond([{ ...run8Contact, required_fixes: ['assert the success message text'] }, third])]);
+  await critique({ scenarios: [sc(CONTACT), sc(THIRD)], url: 'http://localhost:4200/', apiKey: 'fake', client: clean.client });
+  check('T9. a rework that lists a fix is not re-asked (one call)', clean.sent.length === 1, `${clean.sent.length} calls`);
+  const repairReview = scriptedCalls([respond([{ scenario: CONTACT, verdict: 'rework', reasons: ['one fix not applied'], required_fixes: [], fixes: [{ fix: 'f', applied: false, reason: 'not done' }], observations: [] }])]);
+  await critique({ scenarios: [sc(CONTACT)], url: 'http://localhost:4200/', apiKey: 'fake', client: repairReview.client, repairFixes: new Map([[CONTACT, ['f']]]) });
+  check('T10. the repair review is not re-asked for an empty required_fixes: it judges fixes, it lists none', repairReview.sent.length === 1, `${repairReview.sent.length} calls`);
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);

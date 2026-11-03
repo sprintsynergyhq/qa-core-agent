@@ -728,25 +728,45 @@ using the qa-core-heal evaluation report as the template.
   (advisor decision Oct 23). docs/audit/run-59540f-diagnosis.md, D6.
 - Run 8 (71d739) items, ranked, most severe first. All in
   docs/audit/run-71d739-diagnosis.md, section 3.
-- D1 (run 8): OPEN. A universal claim is met by a count-0 absence on an
-  empty list: "only hammers remained" ships green while the filter left
-  no product. RULE 7 refused the all-items form (the checkbox label is
-  not a typed value), the Explorer put the literal in a `:has-text()`
-  selector RULE 7 does not read, and the Critic accepted the absence
-  under rule 11. Lock: a list that empties after a filter.
-- D2 (run 8): OPEN, owner decision (invariant 70 f). The wrong-password
-  scenario ran 5 times (explorer 1, replay 1, stability 3) and locked
-  the dedicated account under the default cap of 10; one such scenario
-  needs up to 7 submits per run. Line 5 was met by run order only.
-  Lock: a fixture that locks after 3 failed submits.
-- D3 (run 8): OPEN. A cost-ceiling stop skips the $0 emitted-spec check
-  (emitted-check.ts line 383 skips every stopped run), so the zip ships
-  unverified and the README does not say so. Lock: smoke-emitted-check
-  with a cost_ceiling report.
-- D4 (run 8): OPEN. Two first-pass reworks list no required fix and call
-  the scenario acceptable in their own reasons; both dropped at the
-  repair stage. Lock: smoke-critic-parse and smoke-repair-pass with the
-  two verdicts verbatim.
+- D1 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged). A
+  universal claim is met by a count-0 absence on an empty list: "only
+  hammers remained" ships green while the filter left no product. RULE 7
+  refused the all-items form (the checkbox label is not a typed value),
+  the Explorer put the literal in a `:has-text()` selector RULE 7 does not
+  read, and the Critic accepted the absence under rule 11. Now doctrine
+  rule 11 and the Critic's rule 6 say a count-0 absence answers only a
+  none or no claim; RULE 7 reads literals inside a css selector at the
+  tool and the gate; an all-items pattern may be the label of a filter
+  the scenario checked or selected (invariant 79). Locked by
+  smoke-filter-claims, smoke-prompt-agreement and smoke-critic-parse.
+- D2 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged),
+  decided Nov 3: no wrong-password scenario in stability, cap 3, serial
+  emitted login tests (invariant 70 f). The wrong-password scenario ran
+  5 times (explorer 1, replay 1, stability 3) and locked the dedicated
+  account under the default cap of 10; one such scenario needs up to 7
+  submits per run. Line 5 was met by run order only. Now stability skips
+  it (credential safety, never stable or flaky), the default cap is 3,
+  and both emitters run it after the happy login in a serial block
+  (invariant 79). Locked by smoke-lockout-safety (a fixture that locks
+  after 3 failed logins in a row still signs in after a full $0 pass and
+  two framework runs) and smoke-test-credentials.
+- D3 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged). A
+  cost-ceiling stop skips the $0 emitted-spec check (emitted-check.ts
+  line 383 skips every stopped run), so the zip ships unverified and the
+  README does not say so. Now a cost-ceiling stop runs the check; any
+  other zip written without it puts "This framework was NOT run before it
+  was written: <reason>." first in its README, records emittedCheck
+  "skipped" with the reason in run-meta.json and says so on the console
+  (invariant 79). Locked by smoke-emitted-check (F).
+- D4 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged). Two
+  first-pass reworks list no required fix and call the scenario
+  acceptable in their own reasons; both dropped at the repair stage. Now
+  such a rework is asked again once naming the contradiction; still no
+  fix keeps it as pass with "critic rework without a required fix; kept",
+  never repaired or dropped for it, and review.repair still counts it, so
+  the first-pass rework rate is never lowered (invariant 79). Locked by
+  smoke-critic-parse (T) and smoke-repair-pass (M), with the two verdicts
+  verbatim.
 - D5 (run 8): OPEN. A counter absent before the first add cannot be
   recorded (RULE 9 refuses a count capture, a text capture cannot
   resolve), so R6 dropped on a fix the page cannot satisfy; RULE 9 also
@@ -758,9 +778,14 @@ using the qa-core-heal evaluation report as the template.
   quantity 0 still adds an item, and the Hammer filter empties the list.
   The repair pass starts a fresh retry count, so one failure in each
   pass never reaches the cap. Neither is established as a bug yet.
-- D7 (run 8): OPEN. Attempt 1's page filter printed a billing error as
-  "(deterministic fallback)" with no reason (standing rule 2). Lock:
-  smoke-page-filter with a client that throws the billing error.
+- D7 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged).
+  Attempt 1's page filter printed a billing error as "(deterministic
+  fallback)" with no reason (standing rule 2). Now every fallback line
+  names its reason, and a billing error stops the run at the page filter
+  (checkpoint and stop line), the requirements map and the feature parser
+  (stop line, no state to resume), and the Critic and the Stabilizer (at
+  once: nothing ships unreviewed or unverified) (invariant 79). Locked by
+  smoke-page-filter (K) and smoke-billing-stops.
 - D8 (run 8): OPEN, smaller items: (a) rule coverage credits R1 and R12
   to tests that do not exercise them (the citation check reads the
   category only); (b) the same-page overlap drop below, seen live; (c) a

@@ -8,10 +8,10 @@ export { recoverResolve, type ResolveInput };
 import type { Assertion, Scenario, SelectorRecord, TraceStep, CaptureSource, CompareRelation, CredentialMarker, GenerateKind } from './trace.js';
 import { baseLocator } from './replay.js';
 import { detectUniqueField, generateUnique, isEmailField } from './unique-data.js';
-import { runGate, gateRuleLabel, gateBrokenReason, catalogueLiteralReason, counterLiteralReason, counterCountCaptureReason, generatedIdReason, fragileCompareReason, fragileAssertReason, priceInNameReason, type GateViolation } from './gate.js';
+import { runGate, gateRuleLabel, gateBrokenReason, catalogueLiteralReason, selectorLiteralReason, counterLiteralReason, counterCountCaptureReason, generatedIdReason, fragileCompareReason, fragileAssertReason, priceInNameReason, type GateViolation } from './gate.js';
 import { captureActualState } from './actual-state.js';
 import { parseNumber, noNumberMessage, sameValue } from './parse-number.js';
-import { ALL_ITEMS_FLAGS, escapeForPattern, pollAllItems, typedValueForPattern } from './all-items.js';
+import { ALL_ITEMS_FLAGS, chosenOrTypedValueForPattern, escapeForPattern, pollAllItems } from './all-items.js';
 import { scenarioNameKey, claimPlanned } from './rule-coverage.js';
 import { plannedPageViolation, plannedPageRefusal, plannedPageBrokenReason, type PlannedPageEntry } from './planned-page.js';
 import { adaptiveTimeout, ADAPTIVE_CEILING_MS, ADAPTIVE_FLOOR_MS } from './adaptive-timeout.js';
@@ -652,7 +652,7 @@ export const TOOL_DEFS = [
       'To assert the CURRENT value of a form field (an input you filled, a textarea, a select), use toHaveValue with the expected value, NOT toHaveAttribute("value", ...). Typed text lives on the value PROPERTY, so toHaveAttribute reads empty; toHaveValue reads the property. ' +
       'FORMAT instead of literal: toHaveText, toContainText and toHaveAttribute take `regex` (a regex source such as "^\\$\\d+\\.\\d{2}$" for a price, "^\\S+ \\S+$" for a name-shaped string, "\\S" for non-empty) in place of text/value; the element must MATCH it. Use this for catalogue data (a price is rendered, a name is present) where a literal would rot. ' +
       'MINIMUM count: toHaveCount with `atLeast` (e.g. atLeast: 1) proves at least that many elements and polls; it never pins the catalogue count. ' +
-      'EVERY ITEM: for an "only matching" or "all items" outcome (a search or filter shows only items with the term), use allItemsMatch with the hints for the ITEM locator (every product name, not the first) and `text` set to the value you typed (the search term); it checks, in one read of the whole list, that there is at least 1 item and every item matches, so checking the first item is never needed. ' +
+      'EVERY ITEM: for an "only matching" or "all items" outcome (a search or filter shows only items with the term), use allItemsMatch with the hints for the ITEM locator (every product name, not the first) and `text` set to the value you typed (the search term) or the visible label of the filter you checked or selected (a category checkbox named "Hammer"); it checks, in one read of the whole list, that there is at least 1 item and every item matches, so checking the first item is never needed. A count-0 absence never proves an only, all, every or each outcome: it also passes on an empty list. A literal inside a css selector (:has-text, :text, text=, [title=...]) is read by RULE 7 like an expected text. ' +
       'CHECKED state: toBeChecked asserts a checkbox or radio is checked (pass checked: false for not checked). ' +
       'ALWAYS pass `intent`: a short name for the element ("thank you message", "first product price"). It becomes the page-object field name in the emitted framework. When you omit it, one is derived from the hints (the testid words, the label, the role and its name, the text, the css testid / id / words) and recorded; "element" is never recorded.',
     input_schema: {
@@ -667,7 +667,7 @@ export const TOOL_DEFS = [
         label: { type: 'string' },
         testid: { type: 'string' },
         css: { type: 'string' },
-        text: { type: 'string', description: 'A locator hint, the expected text for toHaveText / toContainText, or for allItemsMatch the value this scenario typed (the search term) that every item must contain.' },
+        text: { type: 'string', description: 'A locator hint, the expected text for toHaveText / toContainText, or for allItemsMatch the value this scenario typed (the search term) or the visible label of the filter it checked or selected, that every item must contain.' },
         pattern: { type: 'string', description: 'URL substring (literal, no regex required).' },
         count: { type: 'number', description: 'Expected match count for toHaveCount. Use 0 to assert the selector matches nothing (absence).' },
         attribute: { type: 'string', description: 'Attribute name for toHaveAttribute (e.g. aria-valuenow, role, aria-label).' },
@@ -1237,6 +1237,50 @@ async function controlKind(
   }
 }
 
+/**
+ * The visible label of a checkbox, radio or select the tool just acted on,
+ * read off the page (invariant 79): a select's chosen option label; else the
+ * aria-label, the aria-labelledby text, the first <label for>, the wrapping
+ * <label>, or the title, whitespace collapsed. An all-items pattern may name
+ * it, as a typed value. Undefined when the page gives none or the element is
+ * gone: the step then records no label and the pattern falls back to the
+ * locator's own name (never a guessed label).
+ */
+async function choiceLabel(loc: import('@playwright/test').Locator): Promise<string | undefined> {
+  try {
+    const label = await loc.evaluate((el) => {
+      const tidy = (s: string | null | undefined): string => (s ?? '').replace(/\s+/g, ' ').trim();
+      if (el.tagName.toLowerCase() === 'select') {
+        const opt = (el as HTMLSelectElement).selectedOptions[0];
+        return opt ? tidy(opt.label || opt.textContent) : '';
+      }
+      const aria = tidy(el.getAttribute('aria-label'));
+      if (aria) return aria;
+      const by = el.getAttribute('aria-labelledby');
+      if (by) {
+        const text = tidy(by.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? '').join(' '));
+        if (text) return text;
+      }
+      const labels = (el as HTMLInputElement).labels;
+      if (labels && labels.length > 0) {
+        const text = tidy(labels[0]!.textContent);
+        if (text) return text;
+      }
+      const wrap = el.closest('label');
+      if (wrap) {
+        const text = tidy(wrap.textContent);
+        if (text) return text;
+      }
+      return tidy(el.getAttribute('title'));
+    });
+    return label || undefined;
+  } catch {
+    // The element vanished or the page navigated after the action: no label
+    // is recorded, and the step's locator name is what the pattern can use.
+    return undefined;
+  }
+}
+
 /** Current page URL, or '' if the page is closed/navigating. Used for detection. */
 function safeUrl(page: Page): string {
   try { return page.url(); } catch { return ''; }
@@ -1670,7 +1714,8 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
         if (kind === 'select') {
           await loc.selectOption(value);
           ctx.lastActionAt = Date.now();
-          pushStep(ctx, { kind: 'select_option', target: record, by: 'auto', option: value });
+          const selLabel = await choiceLabel(loc);
+          pushStep(ctx, { kind: 'select_option', target: record, by: 'auto', option: value, ...(selLabel ? { label: selLabel } : {}) });
           return { ok: true, data: { selected: record.intent, option: value, autoDispatched: 'select_option' } };
         }
         if (kind === 'checkbox' || kind === 'radio') {
@@ -1678,7 +1723,8 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
           const want = kind === 'radio' ? true : isTruthyCheck(value);
           if (want) await loc.check(); else await loc.uncheck();
           ctx.lastActionAt = Date.now();
-          pushStep(ctx, { kind: 'set_checked', target: record, checked: want });
+          const boxLabel = await choiceLabel(loc);
+          pushStep(ctx, { kind: 'set_checked', target: record, checked: want, ...(boxLabel ? { label: boxLabel } : {}) });
           return { ok: true, data: { checked: want, on: record.intent, autoDispatched: 'set_checked' } };
         }
         if (kind === 'file') {
@@ -1735,7 +1781,8 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
         else return { ok: false, error: 'select_option needs one of optionValue, optionLabel, or optionIndex.' };
         await selectByMode(loc, by, option);
         ctx.lastActionAt = Date.now();
-        pushStep(ctx, { kind: 'select_option', target: record, by, option });
+        const optionLabel = await choiceLabel(loc);
+        pushStep(ctx, { kind: 'select_option', target: record, by, option, ...(optionLabel ? { label: optionLabel } : {}) });
         return { ok: true, data: { selected: record.intent, by, option } };
       }
       case 'set_checked': {
@@ -1745,7 +1792,8 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
         const checked = call.input.checked === undefined ? true : call.input.checked === true;
         if (checked) await loc.check(); else await loc.uncheck();
         ctx.lastActionAt = Date.now();
-        pushStep(ctx, { kind: 'set_checked', target: record, checked });
+        const checkLabel = await choiceLabel(loc);
+        pushStep(ctx, { kind: 'set_checked', target: record, checked, ...(checkLabel ? { label: checkLabel } : {}) });
         return { ok: true, data: { checked, on: record.intent } };
       }
       case 'set_input_files': {
@@ -2783,14 +2831,25 @@ export function allItemsShape(input: AssertionInput, priorSteps: TraceStep[], re
   if (rx instanceof Error) return rx;
   const term = input.text != null ? String(input.text).trim() : '';
   const raw = term ? escapeForPattern(term) : rx;
-  if (!raw) return new Error('allItemsMatch needs text: the value this scenario typed (the search term) that every item must contain.');
-  const typed = typedValueForPattern(raw, priorSteps);
+  if (!raw) return new Error('allItemsMatch needs text: the value this scenario typed (the search term) or the visible label of the filter it checked or selected, that every item must contain.');
+  const typed = chosenOrTypedValueForPattern(raw, priorSteps);
   return { type: 'allItemsMatch', target: { ...record, ambiguous: undefined }, pattern: typed !== null ? escapeForPattern(typed) : raw, flags: ALL_ITEMS_FLAGS };
 }
 
 async function assertWithRetryCap(ctx: ToolContext, input: AssertionInput): Promise<ToolResult> {
+  // RULE 7 on a literal inside the css selector, on every assertion type with
+  // a target (invariant 79, run 71d739 D1: a count 0 on
+  // [data-test='product-name']:not(:has-text("Hammer")) passed on an empty
+  // list). Refused before the probe, nothing recorded.
+  if (ctx.current && input.type !== 'toHaveURL') {
+    const forHint = (input.regex || input.type === 'allItemsMatch' ? { ...input, text: undefined } : input) as unknown as Record<string, unknown>;
+    const selectorHint = hintRecord(forHint, input.type === 'toHaveCount' || input.type === 'allItemsMatch' ? 'elements' : 'element');
+    const inSelector = selectorHint ? selectorLiteralReason(selectorHint) : null;
+    if (inSelector) return { ok: false, error: `RULE 7 (literal catalogue value) rejected this assertion: ${inSelector}.` };
+  }
   // RULE 7 for an all-items assertion: its pattern must be a value this
-  // scenario typed (invariant 77). Refused before the probe, nothing recorded.
+  // scenario typed or a filter label it chose (invariants 77 and 79).
+  // Refused before the probe, nothing recorded.
   if (ctx.current && input.type === 'allItemsMatch') {
     const listHints = { ...input, text: undefined };
     let listRecord: SelectorRecord;

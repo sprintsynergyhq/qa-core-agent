@@ -21,7 +21,7 @@
  *      skip the scenario; toHaveValue on a marked field records the marker;
  *      the D7 and R11 shapes keep the account's identifier.
  *   E. replay fills a marked step from the env, and fails loudly without it.
- *   F. the wrong-password cap: 11 submits, the 11th refused and skipped with
+ *   F. the wrong-password cap (default 3 since invariant 79): 4 submits, the 4th refused and skipped with
  *      the reason; a stated lockout after 3 caps at 2; replay refuses past
  *      the cap; the post-run preflight line and lockoutWarning on a fixture
  *      that locks.
@@ -30,11 +30,13 @@
  *      the zip, read back from disk; a planted value refuses the zip and the
  *      refusal names the file, never the value.
  *   H. a cap refusal is not a failure (standing rule 2): one scenario refused
- *      at replay and one at stability leave replay.failed and flakeRate
- *      exactly as a run without them, are counted 1 and 1 as refused, never
- *      reach the Stabilizer, and are named in reconciliation with the cap
- *      reason; the funnel balances; the CLI and gateway lines and the run
- *      page's verify stage show refused apart.
+ *      at replay leaves replay.failed exactly as a run without it, is counted
+ *      as refused and named in reconciliation with the cap reason; a second
+ *      wrong-password scenario is no longer refused at stability: since
+ *      invariant 79 stability never re-runs one, it is recorded skipped, ships
+ *      on its replay pass, never reaches the Stabilizer, and leaves flakeRate
+ *      as a run without it; the funnel balances; the CLI and gateway lines
+ *      and the run page's verify stage show both apart.
  *   I. a missing login page: the generic pair continues without the account,
  *      prints one line naming every URL tried, and skips the scenarios that
  *      need it "no login page found; test credentials were set" (invariant
@@ -59,7 +61,7 @@ import { runExploreRequest } from '../src/server/run-explore.js';
 import { defaultExploreRequest } from '../src/agent/explore-request.js';
 import { LOGIN_PATHS, NO_LOGIN_PAGE_REASON, noLoginPageLine, preflightLogin, preflightStopLine, postRunLockoutCheck } from '../src/agent/login-preflight.js';
 import {
-  RETIRED_AUTH_LINE, hostEnvSuffix, lockoutThreshold, needsTestAccount, newWrongPasswordLedger, resetRetiredAuthWarning,
+  CREDENTIAL_SAFETY_SKIP_REASON, RETIRED_AUTH_LINE, hostEnvSuffix, lockoutThreshold, needsTestAccount, newWrongPasswordLedger, resetRetiredAuthWarning,
   resolveTestCredentials, retiredAuthEnvLine, wrongPasswordCap, wrongPasswordSubmits, wrongPasswordCountLine,
 } from '../src/agent/test-credentials.js';
 import { CREDENTIAL_REDACTION, CredentialLeakError, assertNoCredentialLeak, envCredentialValues } from '../src/agent/credential-leak.js';
@@ -383,33 +385,33 @@ try {
     const ctx = createContext(page, 400);
     ctx.testCredentials = { user: USER, pass: PASS };
     ctx.wrongPassword = newWrongPasswordLedger({});
-    check('F1. the default cap is 10', ctx.wrongPassword.cap === 10 && ctx.wrongPassword.capSource === 'default 10');
-    for (let i = 1; i <= 11; i++) {
+    check('F1. the default cap is 3 (invariant 79, run 71d739 D2: 5 submits under the old 10 locked the account)', ctx.wrongPassword.cap === 3 && ctx.wrongPassword.capSource === 'default 3');
+    for (let i = 1; i <= 4; i++) {
       const name = `rejected login with a wrong password ${i}`;
       await runTool(ctx, { name: 'begin_scenario', input: { name, category: 'negative', feature: 'account' } });
       await runTool(ctx, { name: 'navigate', input: { url: `${site.url}/login` } });
       await runTool(ctx, { name: 'fill', input: { intent: 'email input', testid: 'email', credential: 'user' } });
       const r = await runTool(ctx, { name: 'fill', input: { intent: 'password input', testid: 'password', value: `wrong-${i}` } });
-      if (i <= 10) {
+      if (i <= 3) {
         await runTool(ctx, { name: 'click', input: { intent: 'login button', testid: 'login-submit' } });
         await runTool(ctx, { name: 'assert', input: { type: 'toContainText', css: '.alert', text: 'Invalid email or password', timeout: 10000 } });
         const e = await runTool(ctx, { name: 'end_scenario', input: {} });
         if (!r.ok || !e.ok) check(`F2.${i} submit ${i} records`, false, JSON.stringify({ r, e }));
       } else {
-        check('F2. the 11th wrong-password submit is refused before the field is touched and the scenario skipped with the reason',
-          r.ok === false && ctx.skipped.some((s) => s.scenario === name && s.reason === 'would exceed the wrong-password cap (10)') && await page.inputValue('#password') === '', JSON.stringify({ r, skipped: ctx.skipped }));
+        check('F2. the 4th wrong-password submit is refused before the field is touched and the scenario skipped with the reason',
+          r.ok === false && ctx.skipped.some((s) => s.scenario === name && s.reason === 'would exceed the wrong-password cap (3)') && await page.inputValue('#password') === '', JSON.stringify({ r, skipped: ctx.skipped }));
       }
     }
-    check('F3. the counter reads 10 of 10 at the explorer stage, the refusal recorded', ctx.wrongPassword.count === 10 && ctx.wrongPassword.byStage.explorer === 10 && ctx.wrongPassword.refused.length === 1 && site.failures() === 10, JSON.stringify(ctx.wrongPassword));
-    check('F4. the count line', wrongPasswordCountLine(ctx.wrongPassword, 'explorer') === 'wrong-password attempts against the test account: 10 of cap 10 (after explorer)');
+    check('F3. the counter reads 3 of 3 at the explorer stage, the refusal recorded', ctx.wrongPassword.count === 3 && ctx.wrongPassword.byStage.explorer === 3 && ctx.wrongPassword.refused.length === 1 && site.failures() === 3, JSON.stringify(ctx.wrongPassword));
+    check('F4. the count line', wrongPasswordCountLine(ctx.wrongPassword, 'explorer') === 'wrong-password attempts against the test account: 3 of cap 3 (after explorer)');
     const recorded = ctx.scenarios[0]!;
     check('F5. one execution of a wrong-password scenario is one submit; a generated identifier counts 0', wrongPasswordSubmits(recorded) === 1
       && wrongPasswordSubmits({ name: 'rejected login for an account that does not exist', steps: recorded.steps.map((s) => (s.kind === 'fill' && s.credential ? { ...s, credential: undefined, value: 'nobody@example.invalid', generate: 'email' as const } : s)) }) === 0);
     const atCap = await replayScenarioOnce(browser, recorded, { credentials: { user: USER, pass: PASS }, wrongPassword: ctx.wrongPassword, stage: 'replay' }, 10_000);
-    check('F6. replay refuses a run past the cap without opening the page', atCap.passed === false && atCap.error === 'would exceed the wrong-password cap (10)' && atCap.durationMs === 0 && site.failures() === 10, JSON.stringify(atCap));
+    check('F6. replay refuses a run past the cap without opening the page', atCap.passed === false && atCap.error === 'would exceed the wrong-password cap (3)' && atCap.durationMs === 0 && site.failures() === 3, JSON.stringify(atCap));
     const map: RequirementsMap = { features: [{ name: 'account', description: 'sign in', rules: [{ id: 'R9', text: 'The account is locked after 3 failed login attempts.', type: 'behavior' }] }], roles: [], truncated: false };
     check('F7. a stated lockout after 3 attempts caps at 2', lockoutThreshold(map) === 3 && wrongPasswordCap({}, map).cap === 2 && /lowered to 2 by the stated lockout after 3 attempts/.test(wrongPasswordCap({}, map).capSource));
-    check('F8. QA_CORE_WRONG_PASSWORD_CAP overrides the default, and a stated lockout still lowers it', wrongPasswordCap({ QA_CORE_WRONG_PASSWORD_CAP: '4' }).cap === 4 && wrongPasswordCap({ QA_CORE_WRONG_PASSWORD_CAP: '4' }, map).cap === 2 && wrongPasswordCap({ QA_CORE_WRONG_PASSWORD_CAP: 'lots' }).cap === 10);
+    check('F8. QA_CORE_WRONG_PASSWORD_CAP overrides the default, and a stated lockout still lowers it', wrongPasswordCap({ QA_CORE_WRONG_PASSWORD_CAP: '4' }).cap === 4 && wrongPasswordCap({ QA_CORE_WRONG_PASSWORD_CAP: '4' }, map).cap === 2 && wrongPasswordCap({ QA_CORE_WRONG_PASSWORD_CAP: 'lots' }).cap === 3);
     await page.context().close();
 
     // F9: the post-run preflight on a fixture that locks after 3 failures.
@@ -569,12 +571,12 @@ try {
     const baseStab = stabilityReportBlock(await stability({ scenarios: [okSc, flip], credentials, iterations: 3, timeoutMs: 3000, stabilize: false }));
 
     // The run: a cap of 1. The first wrong-password scenario spends it at replay, so the
-    // second is refused at replay, and the first is refused at stability (3 more submits).
+    // second is refused at replay; the first is not re-run at stability at all (invariant 79).
     const ledger = newWrongPasswordLedger({ QA_CORE_WRONG_PASSWORD_CAP: '1' });
     site.flipReady(1);
     const r = await replay({ scenarios: [okSc, broken, flip, wpStab, wpReplay], credentials, wrongPassword: ledger, timeoutMs: 3000 });
     let stabilizerCalls = 0;
-    const stabilizerClient = { messages: { create: async () => { stabilizerCalls++; throw new Error('the Stabilizer must not run on a refused scenario'); } } } as unknown as Anthropic;
+    const stabilizerClient = { messages: { create: async () => { stabilizerCalls++; throw new Error('the Stabilizer must not run on a skipped scenario'); } } } as unknown as Anthropic;
     const stabEvents: string[] = [];
     const s = await stability({ scenarios: r.emitted, credentials, wrongPassword: ledger, iterations: 3, timeoutMs: 3000, stabilize: true, stabilizerClient, onEvent: (e) => stabEvents.push(e.type) });
     const replayBlock = replayReportBlock(r);
@@ -585,19 +587,19 @@ try {
       baseReplay.failed === 1 && replayBlock.failed === baseReplay.failed && replayBlock.refused === 1 && replayBlock.passed === 3, JSON.stringify({ base: baseReplay.failed, run: replayBlock.failed, refused: replayBlock.refused }));
     check('H2. the refused replay verdict carries refused and the cap reason, and never opened a page', rv?.refused === true && rv.passed === false && rv.error === capReason && rv.durationMs === 0 && rv.failedStep === undefined, JSON.stringify(rv));
     const sv = stabBlock.verdicts.find((v) => v.name === wpStab.name);
-    check('H3. flakeRate is unchanged by the refusal (0.5, the same as without it); flaked and broken leave it out, refused counts 1',
-      baseStab.flakeRate === 0.5 && stabBlock.flakeRate === baseStab.flakeRate && stabBlock.flaked === 1 && stabBlock.broken === 1 && stabBlock.refused === 1 && stabBlock.passed === 1
-      && !s.flaked.some((x) => x.name === wpStab.name) && !s.broken.some((x) => x.name === wpStab.name), JSON.stringify({ base: baseStab.flakeRate, run: stabBlock.flakeRate, flaked: stabBlock.flaked, broken: stabBlock.broken, refused: stabBlock.refused }));
-    check('H4. the refused stability verdict is classification refused with the cap reason, not broken, not gave up, no iteration failure',
-      sv?.classification === 'refused' && sv.refusedReason === capReason && sv.gaveUp === undefined && sv.firstFailure === undefined && stabEvents.filter((t) => t === 'scenario_refused').length === 1, JSON.stringify(sv));
-    check('H5. the Stabilizer is never called for a refused scenario', stabilizerCalls === 0);
-    check('H6. the ledger records both refusals at their stage', JSON.stringify(ledger.refused) === JSON.stringify([{ scenario: wpReplay.name, stage: 'replay' }, { scenario: wpStab.name, stage: 'stability' }]) && ledger.count === 1, JSON.stringify(ledger));
+    check('H3. flakeRate is unchanged by the wrong-password scenario (0.5, the same as without it): skipped at stability, counted apart, never flaked, broken or refused',
+      baseStab.flakeRate === 0.5 && stabBlock.flakeRate === baseStab.flakeRate && stabBlock.flaked === 1 && stabBlock.broken === 1 && stabBlock.refused === 0 && stabBlock.credentialSafetySkipped === 1 && stabBlock.passed === 1
+      && !s.flaked.some((x) => x.name === wpStab.name) && !s.broken.some((x) => x.name === wpStab.name) && s.skipped.some((x) => x.name === wpStab.name), JSON.stringify({ base: baseStab.flakeRate, run: stabBlock.flakeRate, flaked: stabBlock.flaked, broken: stabBlock.broken, refused: stabBlock.refused, skipped: stabBlock.credentialSafetySkipped }));
+    check('H4. its stability verdict is classification skipped with the credential-safety reason, not broken, not gave up, no iteration, no refusal event',
+      sv?.classification === 'skipped' && sv.skippedReason === CREDENTIAL_SAFETY_SKIP_REASON && sv.gaveUp === undefined && sv.firstFailure === undefined && stabEvents.filter((t) => t === 'scenario_skipped').length === 1 && !stabEvents.includes('scenario_refused'), JSON.stringify(sv));
+    check('H5. the Stabilizer is never called for a skipped scenario', stabilizerCalls === 0);
+    check('H6. the ledger records the one refusal, at replay; stability spent nothing', JSON.stringify(ledger.refused) === JSON.stringify([{ scenario: wpReplay.name, stage: 'replay' }]) && ledger.count === 1 && ledger.byStage.stability === undefined, JSON.stringify(ledger));
 
     const all = [okSc, broken, flip, wpStab, wpReplay];
     const report = {
       url: `${site.url}/login`, language: 'ts',
       plan: all.map((x) => ({ name: x.name, category: x.category, rationale: 'smoke', feature: 'account' })),
-      scenarios: s.emitted, replay: replayBlock, stability: stabBlock, findings: [],
+      scenarios: [...s.emitted, ...s.skipped], replay: replayBlock, stability: stabBlock, findings: [],
       cascadeStats: { role: 0, label: 0, placeholder: 0, text: 0, alt: 0, title: 0, testid: 0, css: 0, xpath: 0 },
       cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 0, plannerUsd: 0, criticUsd: 0 },
       steps: 0, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
@@ -605,22 +607,22 @@ try {
     const rec = reconcile(report);
     report.reconciliation = rec;
     const dropOf = (n: string) => rec.dropped.find((d) => d.name === n);
-    check('H7. reconciliation names both refusals at their stage with the cap reason',
-      dropOf(wpReplay.name)?.stage === 'replay' && dropOf(wpReplay.name)?.reason === capReason && dropOf(wpStab.name)?.stage === 'stability' && dropOf(wpStab.name)?.reason === capReason, JSON.stringify(rec.dropped));
-    check('H8. the funnel balances: planned 5 = generated 1 + dropped 4; flaky 0, broken 1, refused 2',
-      rec.planned === 5 && rec.generated === 1 && rec.dropped.length === 4 && rec.balanced === true && rec.flaky === 0 && rec.broken === 1 && rec.refused === 2, JSON.stringify({ planned: rec.planned, generated: rec.generated, dropped: rec.dropped.length, flaky: rec.flaky, broken: rec.broken, refused: rec.refused }));
+    check('H7. reconciliation names the replay refusal with the cap reason; the skipped scenario ships, never a drop',
+      dropOf(wpReplay.name)?.stage === 'replay' && dropOf(wpReplay.name)?.reason === capReason && dropOf(wpStab.name) === undefined, JSON.stringify(rec.dropped));
+    check('H8. the funnel balances: planned 5 = generated 2 + dropped 3; flaky 0, broken 1, refused 1',
+      rec.planned === 5 && rec.generated === 2 && rec.dropped.length === 3 && rec.balanced === true && rec.flaky === 0 && rec.broken === 1 && rec.refused === 1, JSON.stringify({ planned: rec.planned, generated: rec.generated, dropped: rec.dropped.length, flaky: rec.flaky, broken: rec.broken, refused: rec.refused }));
     const rendered = renderReconciliation(rec).join('\n');
     const gw = summarize(report).join('\n');
-    check('H9. the reconciliation and the gateway summary show refused apart from failed and flaky',
-      rendered.includes('flaky 0 · broken 1 · refused by the wrong-password cap 2')
+    check('H9. the reconciliation and the gateway summary show the refusal and the skip apart from failed and flaky',
+      rendered.includes('flaky 0 · broken 1 · refused by the wrong-password cap 1')
       && gw.includes('Reality check: 3/4 passed twice (75%) · 1 refused by the wrong-password cap (not run, not counted as failed)')
-      && gw.includes('flake_rate=50.0% · 1 refused by the wrong-password cap (not run, not counted as failed)'), `${rendered}\n${gw}`);
+      && gw.includes('flake_rate=50.0% · 1 not re-run (credential safety: wrong-password scenarios run once in replay; not counted as stable or flaky)'), `${rendered}\n${gw}`);
     const stages = buildStages(report, [], 0);
     const vrow = stages.verify.replay?.verdicts.find((v) => v.name === wpReplay.name);
     const srow = stages.verify.stability?.verdicts.find((v) => v.name === wpStab.name);
-    check('H10. the run page verify stage reads refused from the report, apart from failed and flaked',
-      stages.verify.stat === '1 stable / 1 flaky / 1 refused' && stages.verify.replay?.failed === 1 && stages.verify.replay.refused === 1 && vrow?.refused === true
-      && stages.verify.stability?.flaked === 1 && stages.verify.stability.refused === 1 && stages.verify.stability.flake_rate === 0.5 && srow?.classification === 'refused' && srow.refused_reason === capReason && srow.gave_up === false,
+    check('H10. the run page verify stage reads the replay refusal and the stability skip from the report, apart from failed and flaked',
+      stages.verify.stat === '1 stable / 1 flaky / 1 not re-run (credential safety)' && stages.verify.replay?.failed === 1 && stages.verify.replay.refused === 1 && vrow?.refused === true
+      && stages.verify.stability?.flaked === 1 && stages.verify.stability.refused === 0 && stages.verify.stability.flake_rate === 0.5 && srow?.classification === 'skipped' && srow.refused_reason === null && srow.gave_up === false,
       JSON.stringify({ stat: stages.verify.stat, vrow, srow }));
     const older = buildStages({ ...report, replay: { ...replayBlock, refused: undefined }, stability: { ...stabBlock, refused: undefined } } as RunReport, [], 0);
     check('H11. a report written before the field reads refused as null, never 0', older.verify.replay?.refused === null && older.verify.stability?.refused === null);

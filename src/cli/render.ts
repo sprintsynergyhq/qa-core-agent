@@ -1,6 +1,6 @@
 import type { AgentEvent } from '../agent/runtime.js';
 import type { RunReport } from '../agent/trace.js';
-import { refusedNote, renderReconciliation } from '../agent/reconcile.js';
+import { credentialSkipNote, refusedNote, renderReconciliation } from '../agent/reconcile.js';
 import { renderRuleCoverage } from '../agent/rule-coverage.js';
 import { costLine } from '../agent/cost-total.js';
 
@@ -114,7 +114,7 @@ export function createEventRenderer(opts: EventRendererOptions): (e: AgentEvent)
         const stabilizerCost = e.stabilizerCostUsd ?? 0;
         const stabilizerCostChip = stabilizerCost > 0 ? ` · stabilizer $${stabilizerCost.toFixed(4)}` : '';
         log(
-          `      ${e.stable} stable${recoveredChip} · ${e.flaked} flaked · flake_rate=${(e.flakeRate * 100).toFixed(1)}%${(e.refused ?? 0) > 0 ? ` · ${e.refused} refused by the wrong-password cap` : ''} · ` +
+          `      ${e.stable} stable${recoveredChip} · ${e.flaked} flaked · flake_rate=${(e.flakeRate * 100).toFixed(1)}%${(e.refused ?? 0) > 0 ? ` · ${e.refused} refused by the wrong-password cap` : ''}${credentialSkipNote(e.credentialSafetySkipped)} · ` +
           `${(e.durationMs / 1000).toFixed(1)}s${stabilizerCostChip}`,
         );
         break;
@@ -163,7 +163,7 @@ export function runSummaryLines(result: RunReport): string[] {
     const strictStable = result.reconciliation ? result.reconciliation.stable : result.stability.passed;
     const recovered = result.reconciliation?.recovered ?? result.stability.recovered ?? 0;
     const recoveredNote = recovered > 0 ? ` (+${recovered} recovered)` : '';
-    out.push(`Stability:     ${strictStable}/${total} stable across ${result.stability.iterations}×${recoveredNote} · flake_rate=${pct}%${refusedNote(result.stability.refused)} · ${(result.stability.durationMs / 1000).toFixed(1)}s`);
+    out.push(`Stability:     ${strictStable}/${total} stable across ${result.stability.iterations}×${recoveredNote} · flake_rate=${pct}%${refusedNote(result.stability.refused)}${credentialSkipNote(result.stability.credentialSafetySkipped)} · ${(result.stability.durationMs / 1000).toFixed(1)}s`);
   } else if (result.stability?.skipped) {
     out.push('Stability:     skipped (--no-stability)');
   }

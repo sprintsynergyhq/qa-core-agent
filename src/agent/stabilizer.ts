@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { costOf } from './pricing.js';
 import { stageModel } from './stage-models.js';
+import { isBillingError } from './run-errors.js';
 import type { Scenario, TraceStep, SelectorRecord } from './trace.js';
 
 /**
@@ -186,6 +187,10 @@ export async function proposeStabilityFix(opts: StabilizerOptions): Promise<Stab
       .join('\n');
     usage = response.usage;
   } catch (err) {
+    // A billing or credit error is never a "no proposal": the scenario would
+    // be dropped as broken for a call that never answered. It stops the run
+    // (invariant 79); the runtime saves the checkpoint and prints the stop.
+    if (isBillingError(err)) throw err;
     const reason = err instanceof Error ? err.message : 'unknown LLM error';
     return { proposal: { kind: 'none', reason: `LLM call failed: ${reason}` }, costUsd: 0 };
   }

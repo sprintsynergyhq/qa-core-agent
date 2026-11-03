@@ -2,7 +2,8 @@ import { chromium, type Browser } from 'playwright';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { RunReport, Scenario, TraceStep } from './trace.js';
 import { replayScenarioOnce, type ObservedState, type ReplayAccess } from './replay.js';
-import { canSubmitWrongPassword, refuseWrongPassword, wrongPasswordCapReason, wrongPasswordSubmits } from './test-credentials.js';
+import { isBillingError } from './run-errors.js';
+import { CREDENTIAL_SAFETY_SKIP_REASON, wrongPasswordSubmits } from './test-credentials.js';
 import {
   proposeStabilityFix,
   applyProposal,
@@ -89,9 +90,13 @@ export type StabilityEvent =
       stabilizerCostUsd: number;
       /** Scenarios the wrong-password cap refused before any iteration; never in flaked or flakeRate. */
       refused: number;
+      /** Wrong-password scenarios not re-run for credential safety (invariant 79); never in stable, flaked or flakeRate. */
+      credentialSafetySkipped: number;
     }
   /** The wrong-password cap refused a scenario before any iteration ran (invariant 70); not a failure. */
-  | { type: 'scenario_refused'; name: string; reason: string };
+  | { type: 'scenario_refused'; name: string; reason: string }
+  /** A wrong-password scenario was not re-run (invariant 79, credential safety); it ships on its replay pass. */
+  | { type: 'scenario_skipped'; name: string; reason: string };
 
 /**
  * - `stable`: every iteration passed (e.g. P-P-P)
@@ -99,15 +104,22 @@ export type StabilityEvent =
  * - `broken`: every iteration failed (e.g. F-F-F)
  *
  * - `refused`: the wrong-password cap could not cover every iteration, so no
- *   iteration ran (invariant 70). A guard, not a failure: it is dropped, but
+ *   iteration ran (invariant 70; a report written before invariant 79, which
+ *   skips every wrong-password scenario here before the cap is consulted). A guard, not a failure: it is dropped, but
  *   never counted in flaked, broken or flakeRate and never sent to the
  *   Stabilizer (standing rule 2).
+ *
+ * - `skipped`: a wrong-password scenario (wrongPasswordSubmits > 0) is not
+ *   re-run at all (invariant 79, run 71d739 D2: its three stability
+ *   iterations locked the dedicated account). It ran once in replay and
+ *   ships on that pass; it is never counted as stable, flaked, broken or in
+ *   flakeRate (standing rule 2), and it never reaches the Stabilizer.
  *
  * Both `flaky` and `broken` are dropped from the emitted spec, but the
  * distinction matters for diagnosis — flaky implies a race or non-determinism
  * in the app/test, broken implies the scenario was never replayable.
  */
-export type StabilityClassification = 'stable' | 'flaky' | 'broken' | 'refused';
+export type StabilityClassification = 'stable' | 'flaky' | 'broken' | 'refused' | 'skipped';
 
 /**
  * One Stabilizer attempt on a scenario: what it changed and what happened.
@@ -153,6 +165,8 @@ export interface StabilityVerdict {
   attempts: StabilizerAttempt[];
   /** Set on a `refused` verdict: why no iteration ran ("would exceed the wrong-password cap (N)"). */
   refusedReason?: string;
+  /** Set on a `skipped` verdict: why no iteration ran (CREDENTIAL_SAFETY_SKIP_REASON). */
+  skippedReason?: string;
   /** Earliest failing iteration, if any. Iteration numbers are 1-based. */
   firstFailure?: {
     iteration: number;
@@ -179,8 +193,13 @@ export interface StabilityResult {
   recovered: Scenario[];
   /** Refused by the wrong-password cap before any iteration: dropped, never in flaked. */
   refused: Scenario[];
+  /**
+   * Wrong-password scenarios not re-run for credential safety (invariant 79):
+   * they ship on their replay pass, never in emitted, flaked or the rate.
+   */
+  skipped: Scenario[];
   iterations: number;
-  /** flaked / (total - refused). 0 when no scenario ran an iteration. */
+  /** flaked / (total - refused - skipped). 0 when no scenario ran an iteration. */
   flakeRate: number;
   durationMs: number;
   /** USD cost of all Stabilizer LLM calls during this stage. */
@@ -219,7 +238,11 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
   const flaky: Scenario[] = [];
   const broken: Scenario[] = [];
   const recovered: Scenario[] = [];
+  // Always empty since invariant 79: no wrong-password scenario reaches an
+  // iteration, so none is refused here. Kept for the result shape and for
+  // the report block older readers use.
   const refused: Scenario[] = [];
+  const skipped: Scenario[] = [];
   let stabilizerCostUsd = 0;
 
   opts.onEvent?.({ type: 'stability_started', total: opts.scenarios.length, iterations });
@@ -230,23 +253,22 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
 
     for (const scenario of opts.scenarios) {
       const scenarioStart = Date.now();
-      // A wrong-password scenario spends from the cap on every iteration
-      // (invariant 70). One the remaining cap cannot cover in full is refused
-      // without running a single iteration, and never reaches the Stabilizer.
-      // A refusal is the run's own guard, not a failure of the scenario: it
-      // has its own classification and never counts as flaked or broken
-      // (standing rule 2).
-      const submits = wrongPasswordSubmits(scenario);
-      if (submits > 0 && opts.wrongPassword && !canSubmitWrongPassword(opts.wrongPassword, submits * iterations)) {
-        refuseWrongPassword(opts.wrongPassword, scenario.name, 'stability');
-        const reason = wrongPasswordCapReason(opts.wrongPassword);
-        opts.onEvent?.({ type: 'scenario_refused', name: scenario.name, reason });
+      // A wrong-password scenario is never re-run here (invariant 79, run
+      // 71d739 D2: three stability iterations locked the account). It ran
+      // once in replay; it ships on that pass and is recorded as skipped,
+      // never as stable or flaky, whatever the cap would allow. Before this
+      // rule such a scenario was refused here when the cap could not cover
+      // every iteration (invariant 70); that refusal can no longer happen, so
+      // a new report's stability.refused is always 0, and the field stays for
+      // older reports.
+      if (wrongPasswordSubmits(scenario) > 0) {
+        opts.onEvent?.({ type: 'scenario_skipped', name: scenario.name, reason: CREDENTIAL_SAFETY_SKIP_REASON });
         verdicts.push({
-          name: scenario.name, iterations, passes: 0, stable: false, classification: 'refused', pattern: 'refused', attempts: [],
-          refusedReason: reason,
+          name: scenario.name, iterations, passes: 0, stable: false, classification: 'skipped', pattern: 'skipped', attempts: [],
+          skippedReason: CREDENTIAL_SAFETY_SKIP_REASON,
           durationMs: 0,
         });
-        refused.push(scenario);
+        skipped.push(scenario);
         continue;
       }
       const firstPass = await runIterations(browser, scenario, iterations, timeoutMs, opts);
@@ -265,8 +287,7 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
       // LLM-guided fixes, each informed by what the previous one tried.
       // Skip `broken` (zero passes — real bug, not a flake). Skip `stable`
       // (nothing to fix). Skip when stabilize is disabled (offline mode).
-      const capCoversReRun = submits === 0 || !opts.wrongPassword || canSubmitWrongPassword(opts.wrongPassword, submits * iterations);
-      if (classification === 'flaky' && stabilizeEnabled && firstFailure && capCoversReRun) {
+      if (classification === 'flaky' && stabilizeEnabled && firstFailure) {
         opts.onEvent?.({
           type: 'stabilize_started',
           name: scenario.name,
@@ -365,6 +386,9 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
               pattern: latestPattern,
             });
           } catch (err) {
+            // A billing or credit error stops the run (invariant 79): it is
+            // passed up, never recorded as a crash that drops the scenario.
+            if (isBillingError(err)) throw err;
             // Stabilizer crashes never break the suite — log and move on
             // to the next attempt (or terminate the loop if we're out).
             const reason = err instanceof Error ? err.message : 'unknown stabilizer error';
@@ -444,8 +468,8 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
     await browser?.close().catch(() => undefined);
   }
 
-  // A refused scenario never ran an iteration, so it is outside the rate.
-  const ran = opts.scenarios.length - refused.length;
+  // A refused or skipped scenario never ran an iteration, so it is outside the rate.
+  const ran = opts.scenarios.length - refused.length - skipped.length;
   const flakeRate = ran > 0 ? flaked.length / ran : 0;
   const durationMs = Date.now() - startMs;
 
@@ -459,6 +483,7 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
     durationMs,
     stabilizerCostUsd,
     refused: refused.length,
+    credentialSafetySkipped: skipped.length,
   });
 
   return {
@@ -469,6 +494,7 @@ export async function stability(opts: StabilityOptions): Promise<StabilityResult
     broken,
     recovered,
     refused,
+    skipped,
     iterations,
     flakeRate,
     durationMs,
@@ -492,6 +518,7 @@ export function stabilityReportBlock(s: StabilityResult): NonNullable<RunReport[
     broken: s.broken.length,
     recovered: s.recovered.length,
     refused: s.refused.length,
+    ...(s.skipped.length > 0 ? { credentialSafetySkipped: s.skipped.length } : {}),
     stabilizerCostUsd: s.stabilizerCostUsd,
     flakeRate: s.flakeRate,
     durationMs: s.durationMs,
@@ -500,6 +527,14 @@ export function stabilityReportBlock(s: StabilityResult): NonNullable<RunReport[
     // shown as "none recorded": the report carries the warning.
     ...(s.warning ? { warning: s.warning } : {}),
   };
+}
+
+/**
+ * The console line for a wrong-password scenario stability did not re-run
+ * (invariant 79). The runtime prints it once per such scenario.
+ */
+export function stabilitySkipLine(name: string, reason: string): string {
+  return `Stability: "${name}" not re-run (${reason}); it ships on its replay pass and is not counted as stable or flaky`;
 }
 
 /* ─────────────────── helpers ─────────────────── */

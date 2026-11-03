@@ -8,10 +8,10 @@ import { zipFrameworkToBuffer } from '../agent/zip-framework.js';
 import { writeFrameworkZip, type FrameworkZipOutcome } from '../agent/framework-zip.js';
 import { countRules, requirementsMapForSrs, type RequirementsMap } from '../agent/requirements.js';
 import { renderRuleCoverage } from '../agent/rule-coverage.js';
-import { diagnoseEmptyRun, refusedNote, renderReconciliation } from '../agent/reconcile.js';
+import { credentialSkipNote, diagnoseEmptyRun, refusedNote, renderReconciliation } from '../agent/reconcile.js';
 import { costLine, totalCost } from '../agent/cost-total.js';
 import { deleteCheckpoint, loadCheckpoint, markCheckpointPhase, resumeHintForRun, type Checkpoint } from '../agent/checkpoint.js';
-import { emittedCheckStage, writeReportFiles } from '../agent/emitted-check.js';
+import { emittedCheckMeta, emittedCheckStage, writeReportFiles } from '../agent/emitted-check.js';
 import {
   applyCheckpointFlags, buildExploreOptions, outDirForRequest, resumeConflicts, unknownModelRefusal,
   type ExploreRequest,
@@ -422,20 +422,23 @@ export async function runExploreRequest(input: RunExploreInput): Promise<RunExpl
       } finally {
         try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
       }
+      // A framework written without the emitted-spec check running it says so
+      // in run-meta.json too (invariant 79).
+      const zipMeta = { ...meta, ...emittedCheckMeta(report) };
       if (!zipOutcome.written) {
         // A refusal is recorded on the report and in the events, and the run
         // fails loudly: never a framework outcome without a zip on disk.
         const line = zipOutcome.refused ? zipOutcome.refused.reason : `zip not written: ${zipOutcome.failed ?? 'unknown error'}`;
         if (zipOutcome.refused) writeReportFiles(outDir, report);
         lockoutLog(line);
-        writeRunMeta(outDir, meta);
+        writeRunMeta(outDir, zipMeta);
         throw new Error(line);
       }
       const zipBuf = zipOutcome.written.buffer;
       const filename = `${zipRootName}.zip`;
       // Checkpoint lifecycle: deleted only on a fully complete run; a stopped run keeps it for --resume.
       if (!report.stopped) deleteCheckpoint(outDir);
-      writeRunMeta(outDir, meta);
+      writeRunMeta(outDir, zipMeta);
       finalizeRunDir(outDir);
       const hint = resumeHintForRun({
         ...(report.stopped ? { stopped: report.stopped } : {}),
@@ -486,7 +489,7 @@ export function summarize(report: RunReport): string[] {
     const total = report.stability.passed + report.stability.flaked;
     const strictStable = report.reconciliation ? report.reconciliation.stable : report.stability.passed;
     const recovered = report.reconciliation?.recovered ?? report.stability.recovered ?? 0;
-    out.push(`Stability: ${strictStable}/${total} stable across ${report.stability.iterations}x${recovered > 0 ? ` (+${recovered} recovered)` : ''} · flake_rate=${(report.stability.flakeRate * 100).toFixed(1)}%${refusedNote(report.stability.refused)}`);
+    out.push(`Stability: ${strictStable}/${total} stable across ${report.stability.iterations}x${recovered > 0 ? ` (+${recovered} recovered)` : ''} · flake_rate=${(report.stability.flakeRate * 100).toFixed(1)}%${refusedNote(report.stability.refused)}${credentialSkipNote(report.stability.credentialSafetySkipped)}`);
   }
   if (report.reconciliation) out.push(...renderReconciliation(report.reconciliation));
   if (report.ruleCoverage) out.push(...renderRuleCoverage(report.ruleCoverage));
