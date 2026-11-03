@@ -82,7 +82,7 @@ The other differentiators:
 ### Install
 
 ```bash
-git clone https://github.com/sardarusmanjutt/qa-core-agent.git
+git clone https://github.com/sprintsynergyhq/qa-core-agent.git
 cd qa-core-agent
 cp .env.example .env             # then edit .env and add ANTHROPIC_API_KEY
 bash setup.sh                    # installs deps + Playwright Chromium

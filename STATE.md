@@ -350,11 +350,51 @@ e. Measured and recorded, not graded.
 
 f. Rules for the run. One run. A missed bar is recorded as missed, never re-run to improve the number. If the run stops before the Critic (a crash, a billing error, a preflight stop), it is not graded: the cause is diagnosed at $0, and the owner decides whether a second attempt counts as run 8.
 
+Run 8 verdict: bar missed on lines 1, 3 and 4, met on lines 2 and 5,
+line 6 reported. Run 20261102T130321Z-71d739, $6.20 ($0.20 over the
+ceiling, stated on the cost line), 14 min 58 s; `cost.models` matched
+part b, so it counts as run 8. Attempt 1 (20261102T125106Z-d2c5df)
+stopped on API credit exhaustion at its first Planner call with $0
+spent, before the Critic, so it is not graded (part f). Diagnosis:
+docs/audit/run-71d739-diagnosis.md.
+
+1. Missed: 7 reworks of 15 on the first pass, 46.7 percent (run 7: 50,
+   on the public site). Two of the seven, the contact happy submit and
+   the registration happy, list no required fix and end their own
+   reasons by calling the scenario acceptable (D4); without them, 5 of
+   15, 33.3 percent.
+2. Met: catalogue (/category/*), account (/auth/login, /auth/register)
+   and contact (/contact) by a path segment; the cart probe revealed
+   /checkout through the item hop from /category/hand-tools.
+3. Missed: the emitted-spec check did not run. The Explorer reached its
+   $5.10 share after 15 of 20 scenarios, the run is a cost-ceiling stop,
+   and the stage skips every stopped run: `emittedRun` inconclusive, "not
+   run: the run stopped early (cost_ceiling)" (D3).
+4. Missed: "filtered by Hammer subcategory and only hammers remained"
+   passes on an empty list: the filter took the list from 9 products to
+   none, and its only all-items check is a count-0 absence on names
+   without "Hammer" (D1). Borderline, not counted: the price sort checks
+   the first card only.
+5. Met: "logged in with valid credentials" passed replay, not refused.
+   It ran before the wrong-password executions in replay and stability;
+   the account was locked by the end (D2).
+6. Reported: 10 shipped, 10 of 14 rules by the report. Read by hand, 5
+   fully and 2 partly: R1 and R12 are credited by tests that do not
+   exercise them, R3 by the empty-list test (D8a).
+
+Main cause: the Explorer paid $0.34 per recorded scenario, twice run 7's
+$0.17 (more calls per scenario, and a context that grew to 79K tokens
+per call), so its share ran out with 5 scenarios never explored (R11's
+only citer among them), the repair 1 of 7 short, and the $0 emitted
+check skipped by the stop (D5, D3). The wrong-password scenario ran 5
+times and the test account no longer signs in: unlock it or re-seed
+before any further run on the local Toolshop.
+
 ### Opus 5.5 comparison (planned; runs only if the owner approves)
 
 The run 7 command with only QA_CORE_EXPLORER_MODEL=claude-opus-5-5 set
 (in the price table, so it is not refused), same $6.00 ceiling, same SRS,
-same preconditions, the same main commit as run 7, run after run 8 is graded, on the local Toolshop, re-seeded first:
+same preconditions, the same main commit as run 8, run after run 8 is graded, on the local Toolshop, re-seeded first:
 
 ```bash
 cd /Users/osman/Projects/Openclaw/qa-core-agent && QA_CORE_EXPLORER_MODEL=claude-opus-5-5 npm run explore -- http://localhost:4200/ --srs output/practicesoftwaretesting-com/20260918T163858Z-5e4394/toolshop-srs.md --ceiling 6 --lang ts --pom --replay --stability 3 --stabilize --stabilize-attempts 3
@@ -466,6 +506,21 @@ Oct 1 after #32 $0.5961, 4 shipped, 2 reworks repaired, emitted 6 of 6 with
 credentials. That run was the regression check for #25 to #32.
 
 Live spend on Toolshop to date: $35.84 over seven runs.
+
+## Local Toolshop runs
+
+Self-hosted Toolshop (testsmith-io/practice-software-testing at ae7caecb,
+sprint5; robots.txt without the /auth and /checkout Disallow lines),
+re-seeded before each run, same SRS and requirements map, same $6
+ceiling. A new baseline, not compared line for line with the table above.
+
+| Run | Date | After | Pages | Planned | Explored | Shipped | Cost | End | Diagnosis |
+|---|---|---|---|---|---|---|---|---|---|
+| 8 71d739 | Nov 2 | #53 to #57 | 10 (8 crawl, 2 by action), 9 planned | 20 | 15 | 10 | $6.20 | stopped at the explorer's share, framework written, emitted check not run, test account locked | docs/audit/run-71d739-diagnosis.md |
+
+Attempt 1 (20261102T125106Z-d2c5df) stopped on API credit exhaustion at
+its first Planner call, $0 spent, not graded. Live spend on the local
+Toolshop to date: $6.20 over one graded run.
 
 ## The audit plan
 
@@ -671,6 +726,47 @@ using the qa-core-heal evaluation report as the template.
   locator timeout (smoke-reconcile). Why the site accepted the submit is
   still unknown; reproduced on the self-hosted Toolshop before run 8
   (advisor decision Oct 23). docs/audit/run-59540f-diagnosis.md, D6.
+- Run 8 (71d739) items, ranked, most severe first. All in
+  docs/audit/run-71d739-diagnosis.md, section 3.
+- D1 (run 8): OPEN. A universal claim is met by a count-0 absence on an
+  empty list: "only hammers remained" ships green while the filter left
+  no product. RULE 7 refused the all-items form (the checkbox label is
+  not a typed value), the Explorer put the literal in a `:has-text()`
+  selector RULE 7 does not read, and the Critic accepted the absence
+  under rule 11. Lock: a list that empties after a filter.
+- D2 (run 8): OPEN, owner decision (invariant 70 f). The wrong-password
+  scenario ran 5 times (explorer 1, replay 1, stability 3) and locked
+  the dedicated account under the default cap of 10; one such scenario
+  needs up to 7 submits per run. Line 5 was met by run order only.
+  Lock: a fixture that locks after 3 failed submits.
+- D3 (run 8): OPEN. A cost-ceiling stop skips the $0 emitted-spec check
+  (emitted-check.ts line 383 skips every stopped run), so the zip ships
+  unverified and the README does not say so. Lock: smoke-emitted-check
+  with a cost_ceiling report.
+- D4 (run 8): OPEN. Two first-pass reworks list no required fix and call
+  the scenario acceptable in their own reasons; both dropped at the
+  repair stage. Lock: smoke-critic-parse and smoke-repair-pass with the
+  two verdicts verbatim.
+- D5 (run 8): OPEN. A counter absent before the first add cannot be
+  recorded (RULE 9 refuses a count capture, a text capture cannot
+  resolve), so R6 dropped on a fix the page cannot satisfy; RULE 9 also
+  refused a cart row count. Explorer cost per recorded scenario doubled
+  ($0.3413 against $0.1712): 1.48 times the calls per scenario, 1.35
+  times the cost per call. Lock: a badge that renders after the first
+  add; smoke-prompt-cache for history pruning.
+- D6 (run 8): OPEN. Product behavior seen and not recorded as findings:
+  quantity 0 still adds an item, and the Hammer filter empties the list.
+  The repair pass starts a fresh retry count, so one failure in each
+  pass never reaches the cap. Neither is established as a bug yet.
+- D7 (run 8): OPEN. Attempt 1's page filter printed a billing error as
+  "(deterministic fallback)" with no reason (standing rule 2). Lock:
+  smoke-page-filter with a client that throws the billing error.
+- D8 (run 8): OPEN, smaller items: (a) rule coverage credits R1 and R12
+  to tests that do not exercise them (the citation check reads the
+  category only); (b) the same-page overlap drop below, seen live; (c) a
+  bound toHaveValue misreads a clamped field; (d) a product name inside
+  a locator is not refused; (e) page-object field names keep the first
+  intent; (f) the shipped specs run signed in, the recordings signed out.
 - ADDRESSED (PR #56, engine/probe-planner, not merged): the global
   20-scenario plan cap in planAcrossPages cut without naming what it cut
   (found in PR #53). Now it names every scenario it cuts with its rules

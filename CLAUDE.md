@@ -364,6 +364,6 @@ If you're a Claude instance starting fresh in this project:
 
 1. The agent works. v2 hardening pass is complete. All 7 smoke tests pass. `tsc --noEmit` is clean.
 2. The next planned work is the v3 `/explore` upgrade (see "Active work" above).
-3. The codebase is **not** under git in this directory — there is no `.git/`. The public repo lives at `https://github.com/sardarusmanjutt/qa-core-agent.git`.
+3. The codebase is **not** under git in this directory — there is no `.git/`. The public repo lives at `https://github.com/sprintsynergyhq/qa-core-agent.git`.
 4. Before making any structural change, take a backup using the snippet in the "Backup convention" section above.
 5. After any change, run `npx tsc --noEmit` and the full smoke-test suite.
