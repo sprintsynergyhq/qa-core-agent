@@ -728,7 +728,7 @@ using the qa-core-heal evaluation report as the template.
   (advisor decision Oct 23). docs/audit/run-59540f-diagnosis.md, D6.
 - Run 8 (71d739) items, ranked, most severe first. All in
   docs/audit/run-71d739-diagnosis.md, section 3.
-- D1 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged). A
+- D1 (run 8): ADDRESSED (PR #59, engine/run8-fixes, not merged). A
   universal claim is met by a count-0 absence on an empty list: "only
   hammers remained" ships green while the filter left no product. RULE 7
   refused the all-items form (the checkbox label is not a typed value),
@@ -739,7 +739,7 @@ using the qa-core-heal evaluation report as the template.
   tool and the gate; an all-items pattern may be the label of a filter
   the scenario checked or selected (invariant 79). Locked by
   smoke-filter-claims, smoke-prompt-agreement and smoke-critic-parse.
-- D2 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged),
+- D2 (run 8): ADDRESSED (PR #59, engine/run8-fixes, not merged),
   decided Nov 3: no wrong-password scenario in stability, cap 3, serial
   emitted login tests (invariant 70 f). The wrong-password scenario ran
   5 times (explorer 1, replay 1, stability 3) and locked the dedicated
@@ -750,7 +750,7 @@ using the qa-core-heal evaluation report as the template.
   (invariant 79). Locked by smoke-lockout-safety (a fixture that locks
   after 3 failed logins in a row still signs in after a full $0 pass and
   two framework runs) and smoke-test-credentials.
-- D3 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged). A
+- D3 (run 8): ADDRESSED (PR #59, engine/run8-fixes, not merged). A
   cost-ceiling stop skips the $0 emitted-spec check (emitted-check.ts
   line 383 skips every stopped run), so the zip ships unverified and the
   README does not say so. Now a cost-ceiling stop runs the check; any
@@ -758,7 +758,7 @@ using the qa-core-heal evaluation report as the template.
   was written: <reason>." first in its README, records emittedCheck
   "skipped" with the reason in run-meta.json and says so on the console
   (invariant 79). Locked by smoke-emitted-check (F).
-- D4 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged). Two
+- D4 (run 8): ADDRESSED (PR #59, engine/run8-fixes, not merged). Two
   first-pass reworks list no required fix and call the scenario
   acceptable in their own reasons; both dropped at the repair stage. Now
   such a rework is asked again once naming the contradiction; still no
@@ -778,7 +778,7 @@ using the qa-core-heal evaluation report as the template.
   quantity 0 still adds an item, and the Hammer filter empties the list.
   The repair pass starts a fresh retry count, so one failure in each
   pass never reaches the cap. Neither is established as a bug yet.
-- D7 (run 8): ADDRESSED (PR #PRNUM, engine/run8-fixes, not merged).
+- D7 (run 8): ADDRESSED (PR #59, engine/run8-fixes, not merged).
   Attempt 1's page filter printed a billing error as "(deterministic
   fallback)" with no reason (standing rule 2). Now every fallback line
   names its reason, and a billing error stops the run at the page filter
