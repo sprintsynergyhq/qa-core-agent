@@ -34,6 +34,27 @@ export interface Finding {
   url: string;
   messages: string[];
   kind: FindingKind;
+  /**
+   * What the failing check itself reported the last time it ran: the
+   * Expected and Received lines of the Playwright error, or the compare's
+   * "captured X, now Y" (engine text, never model text; invariant 80).
+   * Absent on a report written before the field and on a locator finding.
+   */
+  failure?: string;
+}
+
+/**
+ * The part of a failing check's error a finding keeps: the Expected and
+ * Received lines when Playwright printed them, else the first line, cut at
+ * 200 characters. Never invents text: an empty error gives undefined.
+ */
+export function failureSummary(message: string): string | undefined {
+  const plain = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const lines = plain.split('\n').map((l) => l.trim()).filter(Boolean);
+  const pair = lines.filter((l) => /^(Expected|Received)\b/.test(l));
+  const out = pair.length > 0 ? pair.join('; ') : lines[0];
+  if (!out) return undefined;
+  return out.length > 200 ? `${out.slice(0, 199)}…` : out;
 }
 
 /**

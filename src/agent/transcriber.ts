@@ -9,6 +9,7 @@ import { inlineParseNumberFn, inlineSameValueFn, sameValuePoll } from './parse-n
 // so the spec and the in-process check agree.
 import { COMPARE_POLL_TIMEOUT_MS, relationsByVarName } from './replay.js';
 import { captureWaitNeeded, inlineAwaitCaptureReadyFn } from './capture-ready.js';
+import { absentCounterReadExpr, inlineReadCounterTextFn, usesAbsentCounter } from './absent-counter.js';
 import { allItemsPollLine } from './all-items.js';
 import type { Assertion, CaptureSource, CredentialMarker, RunReport, Scenario, SelectorRecord, TraceStep } from './trace.js';
 import { AUTH_ENV_PASS, AUTH_ENV_USER, findHappyLoginScenario } from './auth-emit.js';
@@ -86,6 +87,11 @@ export function transcribe(opts: TranscribeOptions): TranscribeResult {
   });
   if (usesCaptureWait) {
     lines.push(inlineAwaitCaptureReadyFn());
+    lines.push('');
+  }
+  // Inline the absent-counter reader when a step reads one (invariant 80).
+  if (report.scenarios.some((s) => usesAbsentCounter(s.steps))) {
+    lines.push(inlineReadCounterTextFn());
     lines.push('');
   }
   if (testIdAttribute) {
@@ -168,8 +174,13 @@ function emitStep(step: TraceStep, relations: Map<string, string> = new Map()): 
       // Read the REAL value off the page into a const the later assert_compare
       // reads back. Count uses the multi-match locator; attribute/text use
       // .first() so a multi-match selector never trips strict mode.
-      const rhs = captureReadExpr(step.source, locFirst(step.target), locCount(step.target), step.attribute);
-      const read = `const ${step.varName} = ${rhs}; // captured ${step.source} for compare`;
+      // An absent counter reads "0" through the inlined readCounterText (invariant 80).
+      const rhs = step.absentAsZero
+        ? absentCounterReadExpr(locFirst(step.target), 'capture')
+        : captureReadExpr(step.source, locFirst(step.target), locCount(step.target), step.attribute);
+      const read = step.absentAsZero
+        ? `const ${step.varName} = ${rhs}; // captured text for compare; an absent counter reads "0"`
+        : `const ${step.varName} = ${rhs}; // captured ${step.source} for compare`;
       // A count read does not auto-wait: wait for the target the way replay
       // does, with replay's timeout, skipped exactly where replay skips it.
       if (captureWaitNeeded(step, relations)) {
@@ -195,7 +206,9 @@ function emitStep(step: TraceStep, relations: Map<string, string> = new Map()): 
       // The re-read element is the compare's own target when it named one
       // (the detail heading against the captured listing name).
       const readFrom = step.readTarget ?? step.target;
-      const rhs = captureReadExpr(step.source, locFirst(readFrom), locCount(readFrom), step.attribute);
+      const rhs = step.absentAsZero
+        ? absentCounterReadExpr(locFirst(readFrom), 'compare')
+        : captureReadExpr(step.source, locFirst(readFrom), locCount(readFrom), step.attribute);
       const pollOpts = `{ timeout: ${COMPARE_POLL_TIMEOUT_MS} }`;
       const lines: string[] = [];
       switch (step.relation) {

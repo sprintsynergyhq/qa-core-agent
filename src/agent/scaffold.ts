@@ -6,6 +6,7 @@ import { transcribePOM, type POMTranscribeResult } from './pom.js';
 import { applyTestIdAttribute, type EmittedTestIdAttribute } from './test-id-emit.js';
 import { renderUniqueDataHelper } from './unique-data.js';
 import { renderParseNumberHelper, renderSameValueHelper } from './parse-number.js';
+import { renderAbsentCounterHelper, usesAbsentCounter } from './absent-counter.js';
 import { renderAwaitCaptureReadyTs, renderAwaitCaptureReadyJs } from './capture-ready.js';
 import { redactCredentialValues } from './datasets.js';
 import { wrongPasswordScenarios } from './login-order.js';
@@ -130,7 +131,7 @@ export function scaffold(opts: ScaffoldOptions): ScaffoldResult {
   };
 
   writeFile('package.json', renderPackageJson(opts, lang));
-  writeFile(`playwright.config.${ext}`, renderPlaywrightConfig(opts, lang, authLogin !== null, loginFeatureOf(authLogin), testIdAttribute));
+  writeFile(`playwright.config.${ext}`, renderPlaywrightConfig(opts, lang, authLogin !== null, loginFeatureOf(authLogin), testIdAttribute, { session: pomResult.sessionFeatures, signedOut: pomResult.signedOutFeatures }));
   if (lang === 'ts') {
     writeFile('tsconfig.json', renderTsConfig());
   }
@@ -144,6 +145,9 @@ export function scaffold(opts: ScaffoldOptions): ScaffoldResult {
   writeFile(`helpers/unique-data.${ext}`, renderUniqueDataHelper(lang));
   writeFile(`helpers/parse-number.${ext}`, renderParseNumberHelper(lang));
   writeFile(`helpers/same-value.${ext}`, renderSameValueHelper(lang));
+  // Written only when a shipped step reads an absent counter (invariant 80),
+  // so every other framework is byte-identical.
+  if (emitReport.scenarios.some((s) => usesAbsentCounter(s.steps))) writeFile(`helpers/absent-counter.${ext}`, renderAbsentCounterHelper(lang));
   // The README quotes the Critic's summary: free text, rendered from the
   // credential-redacted report like the run-report copy (invariant 70).
   writeFile('README.md', renderReadme({ ...opts, report: redactCredentialValues(opts.report) }, pomResult, lang));
@@ -304,27 +308,52 @@ function renderPackageJson(opts: ScaffoldOptions, lang: 'ts' | 'js'): string {
   return JSON.stringify(obj, null, 2) + '\n';
 }
 
-function renderPlaywrightConfig(opts: ScaffoldOptions, lang: 'ts' | 'js', auth = false, loginFeature = 'login', testIdAttribute: EmittedTestIdAttribute | null = null): string {
+function renderPlaywrightConfig(
+  opts: ScaffoldOptions,
+  lang: 'ts' | 'js',
+  auth = false,
+  loginFeature = 'login',
+  testIdAttribute: EmittedTestIdAttribute | null = null,
+  specs: { session: string[]; signedOut: string[] } = { session: [], signedOut: [] },
+): string {
   const baseUrl = opts.report.url;
   // One line in the use block, only when the emitted specs call getByTestId
   // against data-test (invariant 73); otherwise the config is byte-identical.
   const testIdLine = testIdAttribute ? `\n    testIdAttribute: '${testIdAttribute}',` : '';
   if (auth) {
     // storageState flow: the setup project logs in once and saves the session;
-    // authenticated tests depend on it and reuse the saved state; login tests
-    // run WITHOUT it (a logged-in login test is vacuous).
-    const projects = `  projects: [
-    // Logs in once (tests/auth.setup) and saves the session to ${STORAGE_STATE_PATH}.
-    { name: 'setup', testMatch: /.*auth\\.setup\\.(ts|js)$/ },
-    // Login tests drive the login UI themselves — never with a saved session.
-    { name: 'login', use: { ...devices['Desktop Chrome'] }, testMatch: '${loginFeature}/**/*.spec.${lang}' },
-    // Everything else starts authenticated via the saved storage state.
+    // login tests run WITHOUT it (a logged-in login test is vacuous). When
+    // every recorded spec signed in, everything else reuses the saved state,
+    // exactly as before. When some recorded spec ran signed out, only the
+    // specs whose every recording signed in get the session; the rest run
+    // signed out, as their recordings did (invariant 80, run 71d739 D8f).
+    const sessionProject = specs.signedOut.length === 0
+      ? `    // Everything else starts authenticated via the saved storage state.
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'], storageState: ${JSON.stringify(STORAGE_STATE_PATH)} },
       dependencies: ['setup'],
       testIgnore: ['**/${loginFeature}/**', '**/auth.setup.*'],
+    },`
+      : `${specs.session.length > 0 ? `    // Specs whose every recording signed in start on the saved storage state.
+    {
+      name: 'signed-in',
+      use: { ...devices['Desktop Chrome'], storageState: ${JSON.stringify(STORAGE_STATE_PATH)} },
+      dependencies: ['setup'],
+      testMatch: [${specs.session.map((f) => `'${f}/**/*.spec.${lang}'`).join(', ')}],
     },
+` : ''}    // Everything else runs signed out, as every recording of it did.
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+      testIgnore: [${['**/' + loginFeature + '/**', '**/auth.setup.*', ...specs.session.map((f) => `**/${f}/**`)].map((g) => `'${g}'`).join(', ')}],
+    },`;
+    const projects = `  projects: [
+    // Logs in once (tests/auth.setup) and saves the session to ${STORAGE_STATE_PATH}.
+    { name: 'setup', testMatch: /.*auth\\.setup\\.(ts|js)$/ },
+    // Login tests drive the login UI themselves — never with a saved session.
+    { name: 'login', use: { ...devices['Desktop Chrome'] }, testMatch: '${loginFeature}/**/*.spec.${lang}' },
+${sessionProject}
   ],`;
     if (lang === 'js') {
       return `// @ts-check

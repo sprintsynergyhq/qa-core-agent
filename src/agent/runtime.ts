@@ -37,6 +37,7 @@ import {
   type StopClassification,
 } from './checkpoint.js';
 import { installEvalShim } from './eval-shim.js';
+import { newHistoryTracker, pruneFinishedScenarios, trackToolCall } from './history-prune.js';
 import { ASSERTION_DOCTRINE } from './doctrine.js';
 import { maskForDisk } from './credential-leak.js';
 import { preflightLogin, preflightStopReport, runLoginPreflightGate, writePreflightStopReport } from './login-preflight.js';
@@ -115,7 +116,7 @@ ASSERTION RULES — apply before every end_scenario:
    c. assert_compare — pass the SAME name and the relation: "changed" for an id/token that must regenerate, "greater" or "less" for a count that must move, "absent" when the old value must no longer match any element, "equal"/"unchanged" when it must hold. With no element hints it re-reads the element you captured from; with hints (css / testid / role / label) it re-reads THAT element, so two different elements can be compared: capture the listing name, click through, assert_compare {name, relation:"equal", css:"h1"} against the detail heading; capture the first price after a sort, assert_compare {relation:"greater"} with the second card's hints. "greater" and "less" parse the first number out of formatted text ($1,299.00 compares as 1299). An "equal"/"unchanged" compare on the same element with no action since the capture is rejected as circular (it compares a value to itself): act first, or use "changed".
    Concrete dynamic-id example: capture {name:"oldId", source:"attribute", attribute:"id", role:"button", label:"..."} → click the button → assert_compare {name:"oldId", relation:"changed"}. The comparison runs against the real captured id, so it fails exactly when the id stops regenerating. NEVER invent a placeholder like "button-fixed-id" or "previously-captured-id-12345" — capture reads the truth from the page. A value that is supposed to stay STABLE uses assert_freeze, which is the same primitive with relation="unchanged".
 
-9. Unverified success signals. A happy-path assertion is only as good as the signal it checks. If the plan says "lands on /auth/login" or "redirects to /dashboard" but you submit and the page stays put, the redirect was assumed, not real. Do NOT re-fill the whole form and resubmit again and again hoping it works the next time. After one honest retry, stop. Look at what the page ACTUALLY did: read the URL with get_dom, look for a visible success or error message, a toast, an inline validation error. Then assert the real signal you can see (the confirmation message, the cleared form, the error that explains the rejection). If the expected outcome genuinely did not occur, that is a real finding, not something to retry: the system records what the page did. Once a scenario is recorded as a finding, do NOT re-attempt that same flow with different data. Move on to the OTHER planned scenarios (the negative and edge cases) first, so a single expensive happy path does not starve them. Come back to re-attempt the flow only if every other scenario is already done and budget remains. Never burn the budget thrashing one scenario on a success signal that may be wrong. Do NOT call wait() to let the page settle after a submit; wait() is rejected inside a scenario. Use wait_for_text for the state you expect, or assert with a timeout and let Playwright poll. To just re-read the page, call get_dom.
+9. Unverified success signals. A happy-path assertion is only as good as the signal it checks. If the plan says "lands on /auth/login" or "redirects to /dashboard" but you submit and the page stays put, the redirect was assumed, not real. Do NOT re-fill the whole form and resubmit again and again hoping it works the next time. After one honest retry, stop. Look at what the page ACTUALLY did: read the URL with get_dom, look for a visible success or error message, a toast, an inline validation error. Then assert the real signal you can see (the confirmation message, the cleared form, the error that explains the rejection). If the expected outcome genuinely did not occur, that is a real finding, not something to retry: the system records what the page did. When the page contradicts the scenario's expected outcome on a fresh load (for example, quantity 0 still adds an item), record a finding with the observed behavior: assert the planned outcome as planned, never rewrite the assertion to match what you saw, and the second failure of the same check (in this pass or the repair pass) records the finding with what the page showed; a finding is product behavior to review, never a test failure. Once a scenario is recorded as a finding, do NOT re-attempt that same flow with different data. Move on to the OTHER planned scenarios (the negative and edge cases) first, so a single expensive happy path does not starve them. Come back to re-attempt the flow only if every other scenario is already done and budget remains. Never burn the budget thrashing one scenario on a success signal that may be wrong. Do NOT call wait() to let the page settle after a submit; wait() is rejected inside a scenario. Use wait_for_text for the state you expect, or assert with a timeout and let Playwright poll. To just re-read the page, call get_dom.
 
 ${ASSERTION_DOCTRINE}
 
@@ -370,8 +371,15 @@ export function cachedInputShare(cost: Pick<RunReport['cost'], 'inputTokens' | '
  * prefix is always above the model's minimum cacheable length (2048 tokens on
  * Opus 4.7; the system prompt alone is over 10k), so the marker is never
  * silently ignored. Exported so smoke-prompt-cache locks the placement.
+ *
+ * `anchor`, only on the first call after a finished scenario's results were
+ * pruned (invariant 80): a block of an earlier tail, before every edit, gets
+ * a marker so the call reads the unchanged history from cache (the API looks
+ * back about 20 blocks from a marker, and a scenario spans more). It takes
+ * the last system block's slot when four would be exceeded: that prefix is
+ * inside the anchor's.
  */
-export function placeCacheBreakpoints(systemBlocks: Anthropic.TextBlockParam[], messages: Anthropic.MessageParam[]): number {
+export function placeCacheBreakpoints(systemBlocks: Anthropic.TextBlockParam[], messages: Anthropic.MessageParam[], anchor?: object | null): number {
   type Marked = { cache_control?: { type: 'ephemeral' } };
   const mark = (b: object): void => { (b as Marked).cache_control = { type: 'ephemeral' }; };
   const unmark = (b: object): void => { delete (b as Marked).cache_control; };
@@ -386,11 +394,18 @@ export function placeCacheBreakpoints(systemBlocks: Anthropic.TextBlockParam[], 
     const block = tail.content[tail.content.length - 1];
     if (block) mark(block);
   }
-  let count = systemBlocks.filter((b) => (b as Marked).cache_control).length;
-  for (const m of messages) {
-    if (Array.isArray(m.content)) count += m.content.filter((b) => (b as Marked).cache_control).length;
+  const countMarks = (): number => {
+    let n = systemBlocks.filter((b) => (b as Marked).cache_control).length;
+    for (const m of messages) {
+      if (Array.isArray(m.content)) n += m.content.filter((b) => (b as Marked).cache_control).length;
+    }
+    return n;
+  };
+  if (anchor && !(anchor as Marked).cache_control) {
+    mark(anchor);
+    if (countMarks() > 4 && last && systemBlocks.length > 1) unmark(last);
   }
-  return count;
+  return countMarks();
 }
 
 /** What the run keeps and loses when the cost ceiling stops the Explorer. */
@@ -538,6 +553,12 @@ async function repairPass(args: {
   onEvent?: ExploreOptions['onEvent'];
   /** The Explorer's credential context (known real accounts, lockout-exempt scenarios, the test account and its wrong-password counter), applied to the repair context too. */
   credentials?: ExplorerCredentialContext;
+  /**
+   * The main pass's outcome-check failure counts by signature (invariant
+   * 80): the repair starts from them, so the same check failing once in each
+   * pass reaches the retry cap and records its finding (run 71d739 D6).
+   */
+  assertFailures?: ReadonlyMap<string, number>;
 }): Promise<{
   scenarios: Scenario[];
   cost: RunReport['cost'];
@@ -553,6 +574,12 @@ async function repairPass(args: {
    * mid-repair stop, a gate rejection). Kept for droppedTraces only.
    */
   attempts: Record<string, TraceStep[]>;
+  /**
+   * The repair's product findings (the outcome never occurred), under the
+   * recorded rework name. The run records them as findings and the scenario
+   * leaves the drop bucket (invariant 80). Locator findings stay repair drops.
+   */
+  findings: Finding[];
 }> {
   // Scenario names, reason keys and attempt keys come back under the
   // recorded rework name (recordedNameFor), so every verdict lookup keyed by
@@ -589,6 +616,7 @@ async function repairPass(args: {
       if (args.credentials.wrongPassword) ctx.wrongPassword = args.credentials.wrongPassword;
     }
     ctx.wrongPasswordStage = 'repair';
+    if (args.assertFailures) ctx._assertFailures = new Map(args.assertFailures);
     const loop = await runAgentLoop({
       client: args.client,
       model: args.model,
@@ -639,6 +667,7 @@ async function repairPass(args: {
       notes,
       reasons: byRecorded,
       attempts,
+      findings: ctx.findings.filter((f) => findingKindOf(f) === 'product').map((f) => ({ ...f, scenario: recordedNameFor(f.scenario) })),
     };
   } finally {
     await context?.close();
@@ -1263,6 +1292,8 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // Scenarios where the expected outcome never occurred (retry cap tripped).
   // Real findings, not budget casualties. Surfaced loudly below.
   let findings: Finding[] = [];
+  // The main pass's outcome-check failure counts, carried into the repair pass (invariant 80).
+  let mainAssertFailures: ReadonlyMap<string, number> = new Map();
   // In-run selector recoveries applied during exploration (a failed locator
   // re-resolved a different, stable way). Carried into the report for human
   // visibility. The field keeps its `heals` name for the dashboard.
@@ -1469,6 +1500,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     gateInjectionLog = ctx._gateInjectionLog;
     incomplete = ctx.incomplete;
     findings = ctx.findings;
+    mainAssertFailures = ctx._assertFailures;
     heals = ctx.heals;
     skipped = [...accountSkips.map((s) => ({ scenario: s.name, reason: accountSkipReason })), ...ctx.skipped];
     wrongPasswordLine('explorer');
@@ -1495,21 +1527,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   }
   // Surface findings loudly: the expected success signal never appeared, so the
   // scenario is a real finding, not a green test and not a silent drop.
-  for (const f of findings) {
-    if (findingKindOf(f) === 'locator') {
-      // A limit of the run, not product behavior (invariant 67): say so, never "the page stayed at".
-      opts.onEvent?.({
-        type: 'message',
-        text: `Element not found: "${f.scenario}" — could not locate ${elementLookedFor(f.expected)} on ${f.url}. ${f.messages.join(' | ')} Recorded apart from product findings; a limit of the run, not product behavior.`,
-      });
-      continue;
-    }
-    const where = f.messages.length ? ` Page said: ${f.messages.join(' | ')}.` : ' No visible message on the page.';
-    opts.onEvent?.({
-      type: 'message',
-      text: `Finding: "${f.scenario}" — expected ${f.expected}, but the page stayed at ${f.url}.${where} Recorded as a finding, not retried.`,
-    });
-  }
+  for (const f of findings) opts.onEvent?.({ type: 'message', text: findingLine(f) });
 
   // Step 3 — Critic (Sonnet). Reviews what the Explorer recorded. A resumed
   // run carries the verdicts the original run already paid for: only the
@@ -1642,6 +1660,8 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       // own reasons, carried onto the history entry so the funnel drops the
       // scenario at the repair stage with that reason (D4, run 44cb3d).
       let repairReasons: Record<string, string> = {};
+      // Rework scenarios the repair pass recorded as product findings (invariant 80).
+      const repairFindingNames = new Set<string>();
       if (decision.run) {
         opts.onEvent?.({ type: 'repair_started', count: decision.rework.length, budgetUsd: decision.budgetUsd });
         try {
@@ -1655,7 +1675,17 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
             ...(opts.requirements ? { requirements: opts.requirements } : {}),
             onEvent: opts.onEvent,
             ...(explorerCredentialContext ? { credentials: explorerCredentialContext } : {}),
+            assertFailures: mainAssertFailures,
           });
+          // A product finding in the repair is the run's finding (invariant 80):
+          // the same check failed in both passes, so the scenario leaves the
+          // drop bucket and is reported as product behavior to review.
+          for (const f of repair.findings) {
+            if (findings.some((x) => scenarioNameKey(x.scenario) === scenarioNameKey(f.scenario))) continue;
+            findings.push(f);
+            repairFindingNames.add(scenarioNameKey(f.scenario));
+            opts.onEvent?.({ type: 'message', text: findingLine(f) });
+          }
           cost.inputTokens += repair.cost.inputTokens;
           cost.outputTokens += repair.cost.outputTokens;
           cost.cacheReadTokens += repair.cost.cacheReadTokens;
@@ -1727,7 +1757,10 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       // The closing paragraph reads the final verdicts: a re-judged
       // scenario's second-pass outcome replaces the first-pass complaint,
       // which stays only on its history entry (invariant 72).
-      review = { verdicts: merged.final, summary: finalCriticSummary({ firstSummary: review.summary, secondSummary, final: merged.final, history: merged.history }), repair: merged.history };
+      // A rework the repair recorded as a finding is marked on its journey, so
+      // the funnel counts it as a finding, never as a repair drop.
+      const history = merged.history.map((h) => repairFindingNames.has(scenarioNameKey(h.scenario)) && h.second === undefined ? { ...h, finding: true as const } : h);
+      review = { verdicts: merged.final, summary: finalCriticSummary({ firstSummary: review.summary, secondSummary, final: merged.final, history }), repair: history };
       kept = [...kept, ...merged.replay];
       for (const h of merged.history) {
         const fixesNote = h.fixes ? `, ${h.fixes.filter((f) => f.applied).length} of ${h.fixes.length} required fixes applied` : '';
@@ -2394,6 +2427,11 @@ export async function runAgentLoop(args: {
   // visible event in the run output.
   let emittedHeals = 0;
   let emittedNotes = 0;
+  // History pruning (invariant 80): a closed scenario's bulky tool results
+  // become one line at the boundary, and the next call reads the unchanged
+  // history through the anchor breakpoint.
+  const history = newHistoryTracker();
+  let pruneAnchor: object | null = null;
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (cost.usd > maxUsd) {
@@ -2427,7 +2465,8 @@ export async function runAgentLoop(args: {
     // Prompt cache: move the conversation breakpoint to the latest message so
     // this call reads the whole prior history from cache. See
     // placeCacheBreakpoints for the four-slot placement.
-    placeCacheBreakpoints(systemBlocks, messages);
+    placeCacheBreakpoints(systemBlocks, messages, pruneAnchor);
+    pruneAnchor = null;
     let response: Anthropic.Message;
     try {
       response = await client.messages.create({
@@ -2490,10 +2529,12 @@ export async function runAgentLoop(args: {
         else orientationTools.push(block.name);
       }
       onEvent?.({ type: 'tool_call', name: block.name, input: block.input });
+      const inScenario = ctx.current?.name ?? null;
       const result = await runTool(ctx, {
         name: block.name,
         input: (block.input ?? {}) as Record<string, unknown>,
       });
+      trackToolCall(history, { id: block.id, name: block.name, ok: result.ok }, inScenario, ctx);
       onEvent?.({ type: 'tool_result', name: block.name, ok: result.ok, data: result.data, error: result.error });
       // Surface any selector recoveries that just happened, one distinct event each.
       while (emittedHeals < ctx.heals.length) {
@@ -2514,6 +2555,13 @@ export async function runAgentLoop(args: {
     }
 
     messages.push({ role: 'user', content: toolResults });
+    // A scenario closed this round: its bulky results leave the history now,
+    // once, at the boundary (invariant 80).
+    if (history.ready.length > 0) {
+      const pruned = pruneFinishedScenarios(messages, history.ready);
+      history.ready = [];
+      if (pruned.pruned > 0) pruneAnchor = pruned.anchor;
+    }
     // Per-scenario checkpoint hook: fire once per round in which the
     // completed-scenario count grew.
     if (ctx.scenarios.length > completedSeen) {
@@ -2566,6 +2614,22 @@ export function firstExplorerMessage(plan: PlannedScenario[], url: string): stri
   return `${original}\n` +
     `Every planned scenario names its own page, so start at scenario 1, "${first.name}": call begin_scenario first, ${how}. ` +
     'Do not call navigate or get_dom before the first begin_scenario.';
+}
+
+/**
+ * The console line for one finding. A product finding names what was
+ * expected, where the page was, what it said and what the check itself
+ * reported; a locator finding is a limit of the run (invariant 67), never
+ * "the page stayed at".
+ */
+export function findingLine(f: Finding): string {
+  if (findingKindOf(f) === 'locator') {
+    return `Element not found: "${f.scenario}" — could not locate ${elementLookedFor(f.expected)} on ${f.url}. ${f.messages.join(' | ')} Recorded apart from product findings; a limit of the run, not product behavior.`;
+  }
+  const sentence = (t: string): string => (/[.!?]$/.test(t) ? t : `${t}.`);
+  const where = f.messages.length ? ` Page said: ${sentence(f.messages.join(' | '))}` : ' No visible message on the page.';
+  const check = f.failure ? ` The check reported: ${sentence(f.failure)}` : '';
+  return `Finding: "${f.scenario}" — expected ${f.expected}, but the page stayed at ${f.url}.${where}${check} Recorded as a finding, not retried.`;
 }
 
 /** The console line for orientation calls (invariant 73), or null when there were none. */

@@ -245,11 +245,17 @@ export function reconcile(report: RunReport, opts: ReconcileOptions = {}): Recon
   // written before the runtime recorded one) says so rather than borrowing
   // the verdict's reasons.
   const notRepaired = new Map<string, string>();
+  // A rework the repair pass recorded as a product finding is a finding, not
+  // a drop (invariant 80): the findings term below counts it, once.
+  const findingKeys = new Set(findingsOf(report).map((f) => scenarioNameKey(f.scenario)));
+  const asFinding = new Set<string>();
   for (const h of report.review?.repair ?? []) {
+    if (h.finding && h.second === undefined && findingKeys.has(scenarioNameKey(h.scenario))) { asFinding.add(scenarioNameKey(h.scenario)); continue; }
     if (h.outcome === 'dropped' && h.second === undefined) notRepaired.set(scenarioNameKey(h.scenario), h.notRepaired || REPAIR_REASON_NOT_RECORDED);
   }
   for (const v of report.review?.verdicts ?? []) {
     if (v.verdict === 'pass') continue;
+    if (v.verdict === 'rework' && asFinding.has(scenarioNameKey(v.scenario))) continue;
     const cause = v.verdict === 'rework' ? notRepaired.get(scenarioNameKey(v.scenario)) : undefined;
     if (cause !== undefined) {
       dropped.push({ name: v.scenario, stage: 'repair', reason: `rework, not repaired: ${cause}` });

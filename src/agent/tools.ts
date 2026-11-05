@@ -8,14 +8,16 @@ export { recoverResolve, type ResolveInput };
 import type { Assertion, Scenario, SelectorRecord, TraceStep, CaptureSource, CompareRelation, CredentialMarker, GenerateKind } from './trace.js';
 import { baseLocator } from './replay.js';
 import { detectUniqueField, generateUnique, isEmailField } from './unique-data.js';
-import { runGate, gateRuleLabel, gateBrokenReason, catalogueLiteralReason, selectorLiteralReason, counterLiteralReason, counterCountCaptureReason, generatedIdReason, fragileCompareReason, fragileAssertReason, priceInNameReason, type GateViolation } from './gate.js';
+import { runGate, gateRuleLabel, gateBrokenReason, catalogueLiteralReason, selectorLiteralReason, counterLiteralReason, counterCountCaptureReason, generatedIdReason, fragileCompareReason, fragileAssertReason, priceInNameReason, isCounterSelector, type GateViolation } from './gate.js';
+import { ABSENT_COUNTER_GRACE_MS, readCounterText } from './absent-counter.js';
+import { COMPARE_RELATION_WORDS } from './critic.js';
 import { captureActualState } from './actual-state.js';
 import { parseNumber, noNumberMessage, sameValue } from './parse-number.js';
 import { ALL_ITEMS_FLAGS, chosenOrTypedValueForPattern, escapeForPattern, pollAllItems } from './all-items.js';
 import { scenarioNameKey, claimPlanned } from './rule-coverage.js';
 import { plannedPageViolation, plannedPageRefusal, plannedPageBrokenReason, type PlannedPageEntry } from './planned-page.js';
 import { adaptiveTimeout, ADAPTIVE_CEILING_MS, ADAPTIVE_FLOOR_MS } from './adaptive-timeout.js';
-import { LOCATOR_EXPECTED_PREFIX, LOCATOR_MESSAGE_PREFIX, type Finding } from './finding-kind.js';
+import { LOCATOR_EXPECTED_PREFIX, LOCATOR_MESSAGE_PREFIX, failureSummary, type Finding } from './finding-kind.js';
 import {
   CREDENTIALS_NOT_PROVIDED, FORGOT_FLOW_RE, NEEDS_INBOX_RE, canSubmitWrongPassword, credentialValue, isLoginFlow, recordWrongPassword,
   refuseWrongPassword, wrongPasswordCapReason, wrongPasswordSubmits, type WrongPasswordLedger,
@@ -285,6 +287,8 @@ interface CaptureEntry {
   attribute?: string;
   /** The real value read off the page at capture time. */
   value: string;
+  /** The capture read an absent counter as "0" (invariant 80). */
+  absentAsZero?: true;
 }
 
 export function createContext(page: Page, maxSteps: number): ToolContext {
@@ -687,6 +691,7 @@ export const TOOL_DEFS = [
       'This is how you test "a value changes" features (a regenerating id, a rotating token, an incrementing counter) WITHOUT inventing a literal: capture the value now, perform an action, then assert_compare how it changed. ' +
       'source="attribute" reads an attribute (pass attribute, e.g. "id" or "aria-valuenow"); source="text" reads the trimmed text; source="count" reads how many elements match. ' +
       'The captured value is whatever the page actually holds at run time. Pair every capture with an assert_compare on the same `name`. ' +
+      'A counter (a cart badge, a quantity) read with source="text" that is not on the page yet reads "0", so capture it BEFORE the first add, act, then assert_compare greater. ' +
       'ALWAYS pass `intent`, a short name for the element read ("first product price"); when omitted it is derived from the hints (testid, label, role and text, css) and recorded, never "element".',
     input_schema: {
       type: 'object',
@@ -1482,11 +1487,13 @@ function absenceLocator(page: Page, entry: CaptureEntry) {
  * read is bounded by the compare poll so an element absent from the page
  * (the listing card on the detail page, run 5e4394) cannot wait 30 s.
  */
-async function readBySource(page: Page, entry: CaptureEntry, target: SelectorRecord): Promise<string> {
+async function readBySource(page: Page, entry: CaptureEntry, target: SelectorRecord, counter = false): Promise<string> {
   if (entry.source === 'count') {
     return String(await baseLocator(page, target).count());
   }
   const loc = baseLocator(page, target).first();
+  // A counter that is not on the page reads "0" (invariant 80).
+  if (counter && entry.source === 'text') return readCounterText(loc, 0);
   const opts = { timeout: 1000 };
   if (entry.source === 'attribute') return (await loc.getAttribute(entry.attribute!, opts))?.trim() ?? '';
   return (await loc.textContent(opts))?.trim() ?? '';
@@ -1531,20 +1538,36 @@ async function pollRelation(
   relation: CompareRelation,
   budgetMs: number,
   target: SelectorRecord = entry.target,
-): Promise<{ held: boolean; current: string }> {
+  counter = false,
+): Promise<{ held: boolean; current: string; sawAbsent: boolean }> {
   const deadline = Date.now() + budgetMs;
   let current = '';
+  // Whether a counter re-read found no element (it read "0"), so the step
+  // records absentAsZero and replay and the emitted spec read it the same way.
+  let sawAbsent = false;
   for (;;) {
     try {
-      current = await readBySource(page, entry, target);
-      if (relationHolds(relation, entry.value, current)) return { held: true, current };
+      if (counter && (await baseLocator(page, target).first().count()) === 0) sawAbsent = true;
+      current = await readBySource(page, entry, target, counter);
+      if (relationHolds(relation, entry.value, current)) return { held: true, current, sawAbsent };
     } catch {
       // The element is not there yet (or not at all): keep polling to the deadline.
       current = '';
     }
-    if (Date.now() >= deadline) return { held: false, current };
+    if (Date.now() >= deadline) return { held: false, current, sawAbsent };
     await new Promise((r) => setTimeout(r, 200));
   }
+}
+
+/**
+ * "0" when a counter target matches no element after graceMs (the shared
+ * readCounterText, invariant 80), null when the counter is on the page and
+ * the caller reads it the usual way.
+ */
+async function absentCounterRead(page: Page, record: SelectorRecord, graceMs: number): Promise<'0' | null> {
+  const loc = baseLocator(page, record).first();
+  const text = await readCounterText(loc, graceMs);
+  return text === '0' && (await loc.count()) === 0 ? '0' : null;
 }
 
 /** Steps that change page state: the only things that make an unchanged / equal compare falsifiable. */
@@ -1899,8 +1922,22 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
           }
           value = String(await loc.count());
         } else {
+          // An absent counter reads "0" (invariant 80, run 71d739 D5a): a cart
+          // badge does not exist before the first add, so "capture the badge
+          // text, add, compare greater" could never be recorded. Only a target
+          // RULE 9 names as a counter, judged on the locator alone; any other
+          // target that matches no element still fails loudly below.
+          const hints = call.input as { intent?: string; role?: string; label?: string; testid?: string; css?: string; text?: string };
+          const counter = source === 'text' && captureHint && isCounterSelector(captureHint) ? hintBuiltRecord(ctx, hints) : null;
+          const absent = counter && !(counter instanceof Error) && (await absentCounterRead(ctx.page, counter, ABSENT_COUNTER_GRACE_MS)) !== null ? counter : null;
+          if (absent) {
+            const varName = claimIdent(ctx, 'cap_' + sanitizeIdent(name));
+            ctx.captures.set(name, { varName, source, target: absent, attribute, value: '0', absentAsZero: true });
+            pushStep(ctx, { kind: 'capture', varName, source, target: absent, attribute, intent: absent.intent, absentAsZero: true });
+            return { ok: true, data: { name, source, value: '0', note: 'the counter is not on the page; an absent counter reads "0"' } };
+          }
           const resolved = await resolveAndRecord(ctx, {
-            intent: deriveIntent(call.input as { intent?: string; role?: string; label?: string; testid?: string; css?: string; text?: string }),
+            intent: deriveIntent(hints),
             role: call.input.role as string | undefined,
             label: call.input.label as string | undefined,
             testid: call.input.testid as string | undefined,
@@ -1948,9 +1985,14 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
             css: call.input.css as string | undefined,
             text: call.input.text as string | undefined,
           };
+          // A counter re-read target that is not on the page (the badge after
+          // the last item left the cart) is read off its hints, never resolved:
+          // an absent counter reads "0" (invariant 80).
+          const counter = entry.source === 'text' && compareHint && isCounterSelector(compareHint) ? hintBuiltRecord(ctx, hints) : null;
+          const absentCounter = counter && !(counter instanceof Error) && (await absentCounterRead(ctx.page, counter, 0)) !== null ? counter : null;
           const candidate = entry.source === 'count'
             ? recordFromHints(hints)
-            : (await resolveAndRecord(ctx, hints)).record;
+            : absentCounter ?? (await resolveAndRecord(ctx, hints)).record;
           // Hints that resolve to the capture's own element are the old
           // "same place" usage: no readTarget, same rules as before.
           if (!sameHints(candidate, entry.target) && !(candidate.elementKey && candidate.elementKey === entry.target.elementKey)) {
@@ -1964,6 +2006,10 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
           return { ok: false, error: `assert_compare(${relation}): ${noNumberMessage(entry.value)} (the captured "${name}"). Capture an element whose text holds a number, or use changed / before / after for text.` };
         }
         const readVar = claimIdent(ctx, entry.varName + '_now');
+        let compareAbsentAsZero = false;
+        // A compare whose relation did not hold counts toward the same retry
+        // cap as an assert (invariant 80): the second failure is a finding.
+        const compareSig = compareSignature(entry, relation, readTarget);
 
         if (relation === 'absent') {
           // The captured value itself is the selector now: prove no element
@@ -1973,19 +2019,23 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
           try {
             await expect(loc).toHaveCount(0, { timeout: 5000 });
           } catch {
-            return { ok: false, error: `assert_compare(absent): the captured value "${entry.value}" still matches an element — it did not change.` };
+            return await outcomeFailure(ctx, compareSig, `the captured ${entry.source} "${entry.value}" of ${entry.target.intent} to be gone after the action`, `assert_compare(absent): the captured value "${entry.value}" still matches an element — it did not change.`);
           }
         } else {
           // Re-read the same element the same way, polling briefly so an async
-          // update has time to land, then verify the relation live.
-          const ok = await pollRelation(ctx.page, entry, relation, 5000, readTarget ?? entry.target);
+          // update has time to land, then verify the relation live. A counter
+          // re-read that matches no element reads "0" (invariant 80).
+          const counterRead = entry.source === 'text' && isCounterSelector(readTarget ?? entry.target);
+          const ok = await pollRelation(ctx.page, entry, relation, 5000, readTarget ?? entry.target, counterRead);
+          if (counterRead && (ok.sawAbsent || (entry.absentAsZero && !readTarget))) compareAbsentAsZero = true;
           if (!ok.held) {
             if ((relation === 'greater' || relation === 'less') && parseNumber(ok.current) === null) {
               return { ok: false, error: `assert_compare(${relation}): ${noNumberMessage(ok.current)} at ${(readTarget ?? entry.target).intent}; captured "${entry.value}". The re-read element holds no number.` };
             }
-            return { ok: false, error: `assert_compare(${relation}): captured "${entry.value}", now "${ok.current}" — relation does not hold.` };
+            return await outcomeFailure(ctx, compareSig, `the re-read ${entry.source} of ${(readTarget ?? entry.target).intent} to be ${COMPARE_RELATION_WORDS[relation as Exclude<CompareRelation, 'absent'>].toLowerCase()} the captured "${entry.value}"`, `assert_compare(${relation}): captured "${entry.value}", now "${ok.current}" — relation does not hold.`);
           }
         }
+        ctx._assertFailures.delete(compareSig);
         const bounds = undefined; // bounds are only set by the refactored assert_freeze path
         pushStep(ctx, {
           kind: 'assert_compare',
@@ -1998,6 +2048,7 @@ async function runToolInner(ctx: ToolContext, call: ToolInput): Promise<ToolResu
           readVar,
           bounds,
           ...(readTarget ? { readTarget } : {}),
+          ...(compareAbsentAsZero ? { absentAsZero: true as const } : {}),
         });
         return { ok: true, data: { name, relation } };
       }
@@ -2912,45 +2963,67 @@ async function assertWithRetryCap(ctx: ToolContext, input: AssertionInput): Prom
     if (err instanceof LocatorFindingError) {
       return { ok: false, error: err.message };
     }
-    const failures = (ctx._assertFailures.get(sig) ?? 0) + 1;
-    ctx._assertFailures.set(sig, failures);
-    if (failures < OUTCOME_RETRY_CAP) {
-      // Honest retry budget left. Surface the failure and let the model try again.
-      return { ok: false, error: (err as Error).message };
-    }
-    // Cap reached. Record the finding and stop the thrash.
-    const expected = describeAssertion(input);
-    const actual = await captureActualState(ctx.page);
-    const scenarioName = ctx.current?.name ?? '(unnamed scenario)';
-    recordFinding(ctx, {
-      scenario: scenarioName,
-      category: ctx.current?.category,
-      expected,
-      url: actual.url,
-      messages: actual.messages,
-      // The element was found and the outcome never occurred: product behavior to review.
-      kind: 'product',
-    });
-    // This scenario produced a finding, not a passing test. Drop the half-built
-    // trace (its outcome never held) and block further actions until the model
-    // starts the next scenario.
-    ctx.current = null;
-    ctx.captures.clear();
-    ctx._blockUntilNewScenario = true;
-    const msgLine = actual.messages.length
-      ? ` Visible page messages: ${actual.messages.join(' | ')}.`
-      : ' No visible error, validation, or status message was found on the page.';
-    return {
-      ok: false,
-      error:
-        `Outcome did not occur after ${OUTCOME_RETRY_CAP} attempts. Expected ${expected}, ` +
-        `but the page is at ${actual.url}.${msgLine} This is now the recorded result for this ` +
-        `scenario. Do NOT retry or re-fill the form. Move on to a DIFFERENT planned scenario ` +
-        `(the negative and edge cases) with begin_scenario, so they are not starved. Only come ` +
-        `back to this flow if every other scenario is done. If none remain, call finish().`,
-      data: { finding: true, expected, actual },
-    };
+    return await outcomeFailure(ctx, sig, describeAssertion(input), (err as Error).message);
   }
+}
+
+/**
+ * One failure of an outcome check (an assert, or an assert_compare whose
+ * relation did not hold), counted by signature (invariant 13). Below
+ * OUTCOME_RETRY_CAP the error goes back for an honest retry; at the cap the
+ * scenario becomes a finding with what the page showed and what the check
+ * itself reported (`failure`, invariant 80), the half-built trace is dropped
+ * and every action is blocked until the next begin_scenario. The repair pass
+ * starts from the main pass's counts, so the same check failing once in each
+ * pass reaches the cap (run 71d739 D6: quantity 0 still added an item, and
+ * the repair's failure counted from 0).
+ */
+async function outcomeFailure(ctx: ToolContext, sig: string, expected: string, message: string): Promise<ToolResult> {
+  const failures = (ctx._assertFailures.get(sig) ?? 0) + 1;
+  ctx._assertFailures.set(sig, failures);
+  if (failures < OUTCOME_RETRY_CAP) {
+    // Honest retry budget left. Surface the failure and let the model try again.
+    return { ok: false, error: message };
+  }
+  // Cap reached. Record the finding and stop the thrash.
+  const actual = await captureActualState(ctx.page);
+  const scenarioName = ctx.current?.name ?? '(unnamed scenario)';
+  const failure = failureSummary(message);
+  recordFinding(ctx, {
+    scenario: scenarioName,
+    category: ctx.current?.category,
+    expected,
+    url: actual.url,
+    messages: actual.messages,
+    // The element was found and the outcome never occurred: product behavior to review.
+    kind: 'product',
+    ...(failure ? { failure } : {}),
+  });
+  // This scenario produced a finding, not a passing test. Drop the half-built
+  // trace (its outcome never held) and block further actions until the model
+  // starts the next scenario.
+  ctx.current = null;
+  ctx.captures.clear();
+  ctx._blockUntilNewScenario = true;
+  const msgLine = actual.messages.length
+    ? ` Visible page messages: ${actual.messages.join(' | ')}.`
+    : ' No visible error, validation, or status message was found on the page.';
+  return {
+    ok: false,
+    error:
+      `Outcome did not occur after ${OUTCOME_RETRY_CAP} attempts. Expected ${expected}, ` +
+      `but the page is at ${actual.url}.${msgLine} This is now the recorded result for this ` +
+      `scenario. Do NOT retry or re-fill the form. Move on to a DIFFERENT planned scenario ` +
+      `(the negative and edge cases) with begin_scenario, so they are not starved. Only come ` +
+      `back to this flow if every other scenario is done. If none remain, call finish().`,
+    data: { finding: true, expected, actual },
+  };
+}
+
+/** The retry-cap signature of a compare: the relation, the capture's element and source, and the re-read element. */
+function compareSignature(entry: CaptureEntry, relation: CompareRelation, readTarget: SelectorRecord | undefined): string {
+  const key = (r: SelectorRecord): string => `${r.level}:${JSON.stringify(r.arg)}:${(r.frameChain ?? []).join('>')}`;
+  return ['assert_compare', relation, entry.source, entry.attribute ?? '', key(entry.target), readTarget ? key(readTarget) : ''].join('|');
 }
 
 /**

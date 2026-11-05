@@ -175,6 +175,34 @@ export function stripLeadingLogin(steps: TraceStep[]): TraceStep[] {
   return steps.slice(end + 1);
 }
 
+/**
+ * True when a scenario's recording signed in at its start (invariant 80,
+ * run 71d739 D8f): a leading login sequence (stripLeadingLogin removes it)
+ * whose fills type the test account's identifier by marker (credential:
+ * 'user'). On a report written before the marker (`markers` false), the
+ * leading login stripLeadingLogin finds by its password intent.
+ */
+export function signedInAtStart(s: Pick<Scenario, 'steps'>, markers: boolean): boolean {
+  const rest = stripLeadingLogin(s.steps);
+  if (rest.length === s.steps.length) return false;
+  if (!markers) return true;
+  return s.steps.slice(0, s.steps.length - rest.length).some((st) => st.kind === 'fill' && st.credential === 'user');
+}
+
+/**
+ * The emitter group keys whose specs run on the saved session: every
+ * scenario of the group signed in at its start, and the group is not the
+ * login feature. Every other spec runs signed out, as its recordings did:
+ * run 8 shipped catalogue, cart and contact specs on the storageState
+ * session while every one of those recordings ran signed out with storage
+ * cleared (invariant 4).
+ */
+export function sessionGroups(groups: Array<{ key: string; scenarios: Array<Pick<Scenario, 'steps'>> }>, loginFeature: string, markers: boolean): Set<string> {
+  return new Set(groups
+    .filter((g) => g.key !== loginFeature && g.scenarios.length > 0 && g.scenarios.every((s) => signedInAtStart(s, markers)))
+    .map((g) => g.key));
+}
+
 /** Locator expression for a step target, standalone (no page object). */
 function loc(target: Extract<TraceStep, { kind: 'fill' }>['target']): string {
   return emitLocatorCall(target.level, target.arg, target.ambiguous === true, target.frameChain, target.filterText);
