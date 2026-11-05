@@ -11,7 +11,8 @@ import { COMPARE_POLL_TIMEOUT_MS, relationsByVarName } from './replay.js';
 import { captureWaitNeeded, inlineAwaitCaptureReadyFn } from './capture-ready.js';
 import { allItemsPollLine } from './all-items.js';
 import type { Assertion, CaptureSource, CredentialMarker, RunReport, Scenario, SelectorRecord, TraceStep } from './trace.js';
-import { AUTH_ENV_PASS, AUTH_ENV_USER } from './auth-emit.js';
+import { AUTH_ENV_PASS, AUTH_ENV_USER, findHappyLoginScenario } from './auth-emit.js';
+import { LOGIN_SEQUENCE_COMMENT, LOGIN_SEQUENCE_TITLE, SERIAL_MODE_LINE, loginSequence } from './login-order.js';
 
 /**
  * Turn a verified trace into a runnable Playwright spec.
@@ -99,7 +100,23 @@ export function transcribe(opts: TranscribeOptions): TranscribeResult {
   lines.push(`    try { await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); }); } catch { /* about:blank */ }`);
   lines.push(`  });`);
   lines.push('');
+  // The happy login and every wrong-password test run in one serial block,
+  // the happy login first (invariant 79); null when the report has none.
+  const sequence = loginSequence(report.scenarios, findHappyLoginScenario(report));
   for (const scenario of report.scenarios) {
+    if (sequence && sequence.members.includes(scenario)) {
+      if (scenario !== sequence.anchor) continue;
+      lines.push(...LOGIN_SEQUENCE_COMMENT.map((l) => '  ' + l));
+      lines.push(`  test.describe(${q(LOGIN_SEQUENCE_TITLE)}, () => {`);
+      lines.push(`    ${SERIAL_MODE_LINE}`);
+      lines.push('');
+      const nested: string[] = [];
+      for (const member of sequence.members) emitScenario(nested, member, ext);
+      lines.push(...nested.map((l) => (l ? '  ' + l : l)));
+      lines.push('  });');
+      lines.push('');
+      continue;
+    }
     emitScenario(lines, scenario, ext);
   }
   lines.push(emitA11ySpec(report.url, ext));

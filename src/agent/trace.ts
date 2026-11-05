@@ -86,6 +86,13 @@ export type TraceStep =
       by: 'value' | 'label' | 'index' | 'auto';
       /** The value/label string, or the index rendered as a string. */
       option: string;
+      /**
+       * The chosen option's visible label, read off the page when the tool
+       * selected it. An all-items pattern may name it (a filter the scenario
+       * chose, invariant 79). Absent on a step recorded before the field or
+       * when the page gave none.
+       */
+      label?: string;
     }
   | {
       /**
@@ -96,6 +103,13 @@ export type TraceStep =
       kind: 'set_checked';
       target: SelectorRecord;
       checked: boolean;
+      /**
+       * The checkbox or radio's visible label, read off the page when the
+       * tool acted. An all-items pattern may name it (the Hammer category
+       * filter, invariant 79). Absent on a step recorded before the field or
+       * when the page gave none.
+       */
+      label?: string;
     }
   | {
       /**
@@ -372,6 +386,13 @@ export interface RunReport {
      * whether the scenario closed (kept) or the grace ran out (discarded).
      */
     closeout?: { scenario: string; usd: number; closed: boolean };
+    /**
+     * Set when a billing or credit error at the Critic or the Stabilizer
+     * stopped the run at once (invariant 79): nothing after that stage ran,
+     * no unreviewed or unverified scenario shipped, and every scenario still
+     * in the pipeline is incomplete with the stop reason.
+     */
+    haltedAt?: 'critic' | 'stabilizer';
   };
   /**
    * Multi-page discovery record: the rung that produced the page set, the
@@ -488,6 +509,12 @@ export interface RunReport {
       verdict: 'pass' | 'rework' | 'reject';
       reasons: string[];
       required_fixes: string[];
+      /**
+       * The first review returned "rework" with no required fix (invariant
+       * 79): what the one re-ask decided (kept as pass, or its own verdict)
+       * and the first reasons.
+       */
+      reworkWithoutFix?: { outcome: 'kept' | 'retry-pass' | 'retry-rework' | 'retry-reject'; firstReasons: string[] };
     }>;
     summary: string;
     /**
@@ -508,6 +535,8 @@ export interface RunReport {
       fixes?: Array<{ fix: string; applied: boolean; reason: string }>;
       /** The repair review's new observations: recorded, never a drop. */
       notes?: string[];
+      /** A first-review rework that listed no required fix (invariant 79): counted in the first-pass rework rate whatever its re-ask decided. */
+      reworkWithoutFix?: true;
     }>;
   };
   /**
@@ -576,6 +605,13 @@ export interface RunReport {
      * `broken` or `flakeRate`. Absent on a report written before the field.
      */
     refused?: number;
+    /**
+     * Wrong-password scenarios stability did not re-run (invariant 79,
+     * credential safety: they run once in replay). They ship, and they are
+     * never in `passed`, `flaked`, `broken` or `flakeRate`. Absent when none
+     * was skipped (and on a report written before the field).
+     */
+    credentialSafetySkipped?: number;
     durationMs: number;
     /** Subset of `flaked` classified flaky (≥1 pass, ≥1 fail). */
     flaky?: number;
@@ -600,10 +636,12 @@ export interface RunReport {
       iterations: number;
       passes: number;
       stable: boolean;
-      classification?: 'stable' | 'flaky' | 'broken' | 'refused';
+      classification?: 'stable' | 'flaky' | 'broken' | 'refused' | 'skipped';
       pattern?: string;
       /** On a refused verdict: why no iteration ran ("would exceed the wrong-password cap (N)"). */
       refusedReason?: string;
+      /** On a skipped verdict: why no iteration ran ("credential safety: wrong-password scenarios run once in replay"). */
+      skippedReason?: string;
       /** Shipped only after a Stabilizer relaxed-rule fix — excluded from strict stable. */
       relaxed?: boolean;
       /** True whenever the classification is broken: the Stabilizer gave up, or never had a pass to work from. */
@@ -693,6 +731,14 @@ export interface RunReport {
     durationMs: number;
     inconclusive?: boolean;
     reason?: string;
+    /**
+     * Set when the stage ran no test at all (invariant 79): why the
+     * framework was NOT run before it was written (skipped by the flag, a
+     * stop other than the cost ceiling, the site unreachable, no Playwright
+     * results). The README's first line, run-meta.json and the console say
+     * it. Absent when the check ran the framework.
+     */
+    notRun?: string;
   };
   /**
    * Scenarios whose emitted test failed twice in the emitted-spec check,
@@ -723,7 +769,7 @@ export interface RunReport {
    * execution of a login scenario that fills the test account's identifier
    * with a password that is not the account's, counted across exploration,
    * the repair pass, replay, stability and the emitted-spec check. `cap` is
-   * QA_CORE_WRONG_PASSWORD_CAP (default 10), lowered to N - 1 when the
+   * QA_CORE_WRONG_PASSWORD_CAP (default 3), lowered to N - 1 when the
    * requirements map states a lockout after N attempts. A submit past the cap
    * is refused. Absent when the run had no test credentials.
    */

@@ -14,8 +14,14 @@
  * names" checked the first card only, and the Critic passed it). Doctrine rule
  * 11 is this text, and the Critic's flagging rule 6 quotes it word for word;
  * smoke-prompt-agreement pins both.
+ *
+ * Run 71d739 (D1): "filtered by Hammer subcategory and only hammers
+ * remained" shipped on a count-0 absence of names without "Hammer" after the
+ * filter had emptied the list; the absence holds on an empty list, and the
+ * old text named it as equal to the all-items form. Now a count-0 absence
+ * satisfies only a none or no claim.
  */
-export const UNIVERSAL_CLAIM_RULE = `A scenario name that uses a universal word (only, all, every, each, none, no) about a list claims something about every item: it needs an all-items assertion (assert allItemsMatch on the item locator with the value the scenario typed, which checks in one read of the whole list that there is at least 1 item and every item matches) or a count-0 absence assertion on the items that must not appear. An assertion on the first item proves one item, not the claim.`;
+export const UNIVERSAL_CLAIM_RULE = `A scenario name that uses a universal word (only, all, every, each, none, no) about a list claims something about every item. An only, all, every or each claim needs an all-items assertion: assert allItemsMatch on the item locator with the value the scenario typed or the visible label of the filter it checked or selected, which checks in one read of the whole list that there is at least 1 item and every item matches. A count-0 absence assertion on the items that must not appear satisfies only a none or no claim (for example "no error shown"), never an only, all, every or each claim, because it also passes on an empty list. An assertion on the first item proves one item, not the claim.`;
 
 export const ASSERTION_DOCTRINE = `ASSERTION DOCTRINE, the recurring weaknesses that cost a repair pass. The Explorer records against these rules and the Critic judges against them, in these same words:
 1. Every assertion after a state-changing action carries an explicit timeout (10000-15000 for async outcomes; the gate floors any assertion after an action at 10000ms and caps any at 15000ms, so say what you expect).

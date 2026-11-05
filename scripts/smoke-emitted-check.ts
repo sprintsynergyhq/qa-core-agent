@@ -14,6 +14,9 @@
  *     inconclusive and keeps the framework
  *   - a site that refuses connections records inconclusive (network guard)
  *   - --no-emitted-check skips the stage and the report says so
+ *   - a cost-ceiling stop runs the check like a completed run; a billing stop
+ *     and --no-emitted-check do not, and the README's first line, run-meta.json
+ *     and the console say the framework was NOT run (invariant 79, run 71d739 D3)
  *   - the stage reuses the agent repo's node_modules (no npm install) and
  *     leaves no symlink or run files behind in the framework
  *
@@ -25,7 +28,8 @@ import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { scaffold } from '../src/agent/scaffold.js';
-import { emittedCheckStage, findAgentRoot, testTitleFor } from '../src/agent/emitted-check.js';
+import { emittedCheckMeta, emittedCheckStage, findAgentRoot, testTitleFor } from '../src/agent/emitted-check.js';
+import { writeRunMeta } from '../src/agent/output-layout.js';
 import { AUTH_ENV_PASS, AUTH_ENV_USER } from '../src/agent/auth-emit.js';
 import { reconcile, renderReconciliation } from '../src/agent/reconcile.js';
 import { parseExploreTokens } from '../src/agent/explore-request.js';
@@ -283,12 +287,51 @@ function buildLoginReport(withContact: boolean): RunReport {
   check('E4. the MCP argument emittedCheck: false maps to the same request field', mcp.emittedCheck === false);
 }
 
-/* ─── F. a stopped run does not run the stage ───────────────────────────── */
+/* ─── F. stops: a cost ceiling runs the check, any other stop says it did not ─ */
+// Invariant 79 (run 71d739 D3): run 8 was a cost-ceiling stop, the stage
+// skipped every stopped run, and the zip shipped with a README claiming the
+// verification. The check makes no model call, so a ceiling stop runs it
+// exactly as a completed run; any other stop records why it did not, first
+// in the README, in run-meta.json and on the console.
+const README_FIRST = (dir: string): string => fs.readFileSync(path.join(dir, 'README.md'), 'utf8').split('\n')[0] ?? '';
 {
   const report = buildReport();
-  report.stopped = { kind: 'cost_ceiling', reason: 'cost ceiling hit' };
-  const { dropped, ms } = await stage(report);
-  check('F1. a stopped run records inconclusive "not run" and keeps every scenario', report.emittedRun?.inconclusive === true && /not run: the run stopped early/.test(report.emittedRun.reason ?? '') && dropped.length === 0 && report.scenarios.length === 2 && ms < 5_000, JSON.stringify(report.emittedRun));
+  report.stopped = { kind: 'cost_ceiling', reason: 'cost ceiling hit ($5.1195 against the explorer share); raise QA_CORE_COST_CEILING and resume' };
+  const { frameworkDir, lines, dropped } = await stage(report);
+  const run = report.emittedRun!;
+  check('F1. a cost-ceiling stop runs the check like a completed run: every test judged, not inconclusive, no not-run reason',
+    run.tests.length === 3 && run.inconclusive !== true && run.notRun === undefined && lines.some((l) => l.startsWith('Emitted-spec check: running the written framework once')), JSON.stringify(run));
+  check('F2. it drops the deterministic failure into emitted_failed and the funnel balances, as on a completed run',
+    dropped.length === 1 && dropped[0]?.scenario === scenarios()[1]!.name && report.reconciliation?.emitted_failed?.length === 1 && report.reconciliation.balanced === true, JSON.stringify(report.reconciliation));
+  check('F3. the README carries no not-run line, and run-meta would carry none', !README_FIRST(frameworkDir).startsWith('This framework was NOT run') && JSON.stringify(emittedCheckMeta(report)) === '{}', README_FIRST(frameworkDir));
+  fs.rmSync(path.dirname(frameworkDir), { recursive: true, force: true });
+}
+{
+  const report = buildReport();
+  const reason = 'billing/credit exhaustion (400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}})';
+  report.stopped = { kind: 'billing', reason };
+  const { frameworkDir, lines, dropped, ms } = await stage(report);
+  check('F4. a billing stop does not run the stage: inconclusive "not run", every scenario kept, no Playwright run', report.emittedRun?.inconclusive === true && report.emittedRun.reason === 'not run: the run stopped early (billing)' && report.emittedRun.tests.length === 0 && dropped.length === 0 && report.scenarios.length === 2 && ms < 5_000, JSON.stringify(report.emittedRun));
+  const want = `This framework was NOT run before it was written: the run stopped early (${reason}).`;
+  check('F5. the README\'s first line says the framework was NOT run before it was written, with the reason', README_FIRST(frameworkDir) === want, README_FIRST(frameworkDir));
+  check('F6. the console says it', lines.includes(`WARNING: the framework is written without the emitted-spec check running it: the run stopped early (${reason}). The README's first line and run-meta.json say so.`), lines.join('\n'));
+  const metaDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-emitted-meta-'));
+  writeRunMeta(metaDir, { source: 'cli', flags: { emittedCheck: true }, ...emittedCheckMeta(report) });
+  const meta = JSON.parse(fs.readFileSync(path.join(metaDir, 'run-meta.json'), 'utf8')) as Record<string, unknown>;
+  check('F7. run-meta.json records emittedCheck "skipped" with the reason (the CLI and the gateway write it through emittedCheckMeta)',
+    meta.emittedCheck === 'skipped' && meta.emittedCheckReason === `the run stopped early (${reason})` && (meta.flags as { emittedCheck?: boolean }).emittedCheck === true, JSON.stringify(meta));
+  const cliSrc = fs.readFileSync('src/cli/explore.ts', 'utf8');
+  const gwSrc = fs.readFileSync('src/server/run-explore.ts', 'utf8');
+  check('F8. the CLI and the gateway pass emittedCheckMeta into run-meta.json after the zip', /writeRunMeta\(outDir, \{ source: 'cli', flags: runFlags\(args\), \.\.\.emittedCheckMeta\(result\) \}\)/.test(cliSrc) && /const zipMeta = \{ \.\.\.meta, \.\.\.emittedCheckMeta\(report\) \};/.test(gwSrc) && (gwSrc.match(/writeRunMeta\(outDir, zipMeta\)/g) ?? []).length === 2);
+  fs.rmSync(metaDir, { recursive: true, force: true });
+  fs.rmSync(path.dirname(frameworkDir), { recursive: true, force: true });
+}
+{
+  // --no-emitted-check is a zip written without the check too.
+  const report = buildReport();
+  const { frameworkDir } = await stage(report, { skip: true });
+  check('F9. --no-emitted-check puts the same first line in the README', README_FIRST(frameworkDir) === 'This framework was NOT run before it was written: the emitted-spec check was skipped (--no-emitted-check).' && emittedCheckMeta(report).emittedCheck === 'skipped', README_FIRST(frameworkDir));
+  fs.rmSync(path.dirname(frameworkDir), { recursive: true, force: true });
 }
 
 /* ─── G. credentials in the child env only; a data case removed from the JSON ─ */

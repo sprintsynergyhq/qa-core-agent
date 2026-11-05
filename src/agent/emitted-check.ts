@@ -299,6 +299,42 @@ function withEmittedRun(report: RunReport, run: EmittedRun): RunReport {
   return report;
 }
 
+/** The README's first line when the framework was written without the check running it (invariant 79). */
+export function notRunReadmeLine(reason: string): string {
+  return `This framework was NOT run before it was written: ${reason}.`;
+}
+
+/** The console line for the same case. */
+export function notRunConsoleLine(reason: string): string {
+  return `WARNING: the framework is written without the emitted-spec check running it: ${reason}. The README's first line and run-meta.json say so.`;
+}
+
+/**
+ * The stage ran no test (invariant 79, run 71d739 D3): record why on the
+ * report, put the line first in the framework's README, and say it on the
+ * console. A zip written from this framework carries the line; run-meta.json
+ * carries it through emittedCheckMeta. A README the scaffold did not write
+ * (a --no-pom path never reaches the stage) is left alone and said.
+ */
+function recordNotRun(report: RunReport, frameworkDir: string, run: EmittedRun, notRun: string, log: (line: string) => void): RunReport {
+  withEmittedRun(report, { ...run, notRun });
+  const readme = path.join(frameworkDir, 'README.md');
+  if (fs.existsSync(readme)) fs.writeFileSync(readme, `${notRunReadmeLine(notRun)}\n\n${fs.readFileSync(readme, 'utf8')}`);
+  else log(`WARNING: no README.md in the framework to carry the line: ${notRunReadmeLine(notRun)}`);
+  log(notRunConsoleLine(notRun));
+  return report;
+}
+
+/**
+ * The run-meta.json fields for a framework written without the check
+ * running it: `emittedCheck: 'skipped'` with the reason, or nothing. The CLI
+ * and the gateway both write run-meta through this.
+ */
+export function emittedCheckMeta(report: Pick<RunReport, 'emittedRun'>): { emittedCheck?: 'skipped'; emittedCheckReason?: string } {
+  const reason = report.emittedRun?.notRun;
+  return reason ? { emittedCheck: 'skipped', emittedCheckReason: reason } : {};
+}
+
 /**
  * A login test that failed while the check passed no credentials, on a spec
  * that reads them from env, ran with empty values: say so in the error, so
@@ -378,11 +414,14 @@ export async function emittedCheckStage(opts: EmittedCheckOptions): Promise<Emit
 
   if (opts.skip) {
     log('Emitted-spec check: skipped (--no-emitted-check); the framework is written as generated.');
-    return { ...none, report: withEmittedRun(report, { tests: [], durationMs: 0, inconclusive: true, reason: 'skipped (--no-emitted-check)' }) };
+    return { ...none, report: recordNotRun(report, frameworkDir, { tests: [], durationMs: 0, inconclusive: true, reason: 'skipped (--no-emitted-check)' }, 'the emitted-spec check was skipped (--no-emitted-check)', log) };
   }
-  if (report.stopped) {
+  // A cost-ceiling stop salvaged its completed scenarios through the whole
+  // pipeline, and this stage makes no model call, so it runs exactly as on a
+  // completed run (invariant 79, run 71d739 D3). Any other stop is not run.
+  if (report.stopped && report.stopped.kind !== 'cost_ceiling') {
     log(`Emitted-spec check: not run (the run stopped early: ${report.stopped.reason}).`);
-    return { ...none, report: withEmittedRun(report, { tests: [], durationMs: 0, inconclusive: true, reason: `not run: the run stopped early (${report.stopped.kind})` }) };
+    return { ...none, report: recordNotRun(report, frameworkDir, { tests: [], durationMs: 0, inconclusive: true, reason: `not run: the run stopped early (${report.stopped.kind})` }, `the run stopped early (${report.stopped.reason})`, log) };
   }
   if (report.scenarios.length === 0) {
     return { ...none, report: withEmittedRun(report, { tests: [], durationMs: 0, inconclusive: true, reason: 'not run: no scenarios' }) };
@@ -438,7 +477,7 @@ export async function emittedCheckStage(opts: EmittedCheckOptions): Promise<Emit
     if (probeErr) {
       const reason = `site unreachable before the run (${probeErr}); the framework is kept as generated`;
       log(`WARNING: Emitted-spec check inconclusive: ${reason}`);
-      return { ...none, report: withEmittedRun(report, { tests: [], durationMs: Date.now() - t0, inconclusive: true, reason }) };
+      return { ...none, report: recordNotRun(report, frameworkDir, { tests: [], durationMs: Date.now() - t0, inconclusive: true, reason }, `the site was unreachable before the check (${probeErr})`, log) };
     }
   }
 
@@ -456,7 +495,7 @@ export async function emittedCheckStage(opts: EmittedCheckOptions): Promise<Emit
     if (first.tests.length === 0) {
       const reason = `Playwright produced no results (exit ${String(first.status)}): ${first.stderr || 'no output'}; the framework is kept as generated`;
       log(`WARNING: Emitted-spec check inconclusive: ${reason}`);
-      return { ...none, report: withEmittedRun(report, { tests: [], durationMs: Date.now() - t0, inconclusive: true, reason }) };
+      return { ...none, report: recordNotRun(report, frameworkDir, { tests: [], durationMs: Date.now() - t0, inconclusive: true, reason }, `Playwright produced no results (exit ${String(first.status)})`, log) };
     }
 
     const failedFirst = first.tests.filter((t) => t.status === 'failed');

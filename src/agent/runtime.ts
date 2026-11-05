@@ -7,9 +7,9 @@ import { elementLookedFor, findingKindOf, type Finding } from './finding-kind.js
 import type { PlanSkippedPage, PlanTrimmed, RunReport, Scenario, TraceStep } from './trace.js';
 import { renderMemoryBlock, saveRun, type RunSummary } from './memory.js';
 import { plan, pageFitRejectionLine, lockoutScenarioNames, knownAccountIdentifiers, unreachableFeatures, unreachableFeatureLine, reachActionsText, RULE_RETRY_CAP, type PlannedScenario } from './planner.js';
-import { alignVerdictNames, critique, decideRepairPass, finalCriticSummary, describeStep, repairOutcome, repairDoneEvent, repairScenarioEvents, splitCarriedVerdicts, splitGate, verdictFor, type RepairDoneEvent, type RepairScenarioEvent, type RepairStartedEvent, type ScenarioVerdict } from './critic.js';
+import { alignVerdictNames, critique, decideRepairPass, finalCriticSummary, describeStep, repairOutcome, repairDoneEvent, repairScenarioEvents, splitCarriedVerdicts, splitGate, verdictFor, withReworkWithoutFix, type RepairDoneEvent, type RepairScenarioEvent, type RepairStartedEvent, type ScenarioVerdict } from './critic.js';
 import { replay, replayReportBlock, type ReplayEvent } from './replay.js';
-import { stability, stabilityReportBlock, type StabilityEvent } from './stability.js';
+import { stability, stabilityReportBlock, stabilitySkipLine, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
 import { attachDroppedTraces, traceStoreForRun } from './dropped-traces.js';
 import { attachRuleIds, computeDerivation, computeRuleCoverage, scenarioNameKey, claimPlanned, matchPlanned, notRevealedFeatures, pageNotPlannedFeatures } from './rule-coverage.js';
@@ -27,6 +27,7 @@ import {
   CHECKPOINT_VERSION,
   checkpointPath,
   classifyRunError,
+  isBillingError,
   priorSpend,
   remainingPlan,
   stopMessage,
@@ -267,7 +268,26 @@ export interface ExploreOptions {
   critique?: typeof critique;
   /** Test seam: the Explorer's model client, for exploration and the repair pass. Absent, a real client. */
   explorerClient?: Anthropic;
+  /** Test seam: the page filter's model client (a discovery run over the cap). Absent, a real client. */
+  pageFilterClient?: { messages: { create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message> } };
+  /** Test seam: the Stabilizer's model client. Absent, a real client. */
+  stabilizerClient?: Anthropic;
   onEvent?: (event: AgentEvent) => void;
+}
+
+/**
+ * The incomplete reason of a scenario still in the pipeline when a billing
+ * or credit error stopped the run at a stage (invariant 79).
+ */
+export function haltedReason(stage: 'Critic' | 'Stabilizer', reason: string): string {
+  return stage === 'Critic'
+    ? `not reviewed: the run stopped at the Critic (${reason})`
+    : `not re-run in stability: the run stopped at the Stabilizer (${reason})`;
+}
+
+/** The console line after such a stop: what did not run, and why nothing shipped. */
+export function haltedLine(stage: 'Critic' | 'Stabilizer', n: number): string {
+  return `Stopped at the ${stage}: nothing after it runs (no ${stage === 'Critic' ? 'replay, stability or framework' : 'framework'}); ${n} scenario(s) recorded as incomplete, never shipped ${stage === 'Critic' ? 'unreviewed' : 'unverified'}.`;
 }
 
 /**
@@ -663,7 +683,7 @@ export type AgentEvent =
   | { type: 'stability_started'; total: number; iterations: number }
   | { type: 'stability_iteration_passed'; name: string; iteration: number; durationMs: number }
   | { type: 'stability_iteration_failed'; name: string; iteration: number; failedStep: number; stepKind: string; error: string }
-  | { type: 'stability_done'; stable: number; flaked: number; recovered?: number; refused?: number; iterations: number; flakeRate: number; durationMs: number; stabilizerCostUsd?: number }
+  | { type: 'stability_done'; stable: number; flaked: number; recovered?: number; refused?: number; credentialSafetySkipped?: number; iterations: number; flakeRate: number; durationMs: number; stabilizerCostUsd?: number }
   | { type: 'gate_injection'; scenario: string; step: number; assertionType: string; detail: string }
   | { type: 'gate_broken'; scenario: string; reason: string; attempts: number }
   // Reports an IN-RUN SELECTOR RECOVERY (a locator that failed to resolve was
@@ -969,7 +989,22 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       const featureNames = opts.requirements
         ? opts.requirements.features.map((f) => f.name)
         : opts.features;
-      const filtered = await filterPages({ pages, features: featureNames, apiKey, model: stageModels.pageFilter, ...(opts.requirements ? { featureTokens: featureTokenMap(opts.requirements) } : {}) });
+      let filtered: Awaited<ReturnType<typeof filterPages>>;
+      try {
+        filtered = await filterPages({ pages, features: featureNames, apiKey, model: stageModels.pageFilter, ...(opts.requirements ? { featureTokens: featureTokenMap(opts.requirements) } : {}), ...(opts.pageFilterClient ? { client: opts.pageFilterClient } : {}) });
+      } catch (err) {
+        // A billing or credit error stops the run here, the same clean stop
+        // the Planner makes, never a deterministic fallback (invariant 79,
+        // run 8 attempt 1). Any other error filterPages throws is its own.
+        if (isBillingError(err)) {
+          const cls = classifyRunError(err);
+          const cpFile = saveCheckpoint();
+          opts.onEvent?.({ type: 'message', text: stopMessage(cls.reason, cpFile) });
+          process.removeListener('SIGINT', onSigint);
+          throw new Error(stopMessage(cls.reason, cpFile));
+        }
+        throw err;
+      }
       plannerUsd += filtered.costUsd;
       // One plan per path template: the other members are recorded on the
       // candidates (discovery.json, the Discovery panel) and never planned.
@@ -985,7 +1020,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       if (filtered.method !== 'passthrough') {
         opts.onEvent?.({
           type: 'message',
-          text: `discovery: ${pages.length} page(s) narrowed to ${filtered.pages.length} (${filtered.method === 'llm' ? 'relevance pick' : 'deterministic fallback'})`,
+          text: `discovery: ${pages.length} page(s) narrowed to ${filtered.pages.length} (${filtered.method === 'llm' ? 'relevance pick' : `deterministic fallback: ${filtered.fallbackReason ?? 'reason not recorded'}`})`,
         });
       }
       pages = filtered.pages;
@@ -1523,17 +1558,30 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
         });
       }
     } catch (err) {
-      // The pipeline continues either way (replay/stability are LLM-free),
-      // but billing/API exhaustion marks the run stopped so the checkpoint
-      // survives and the resume hint prints.
       const cls = classifyRunError(err);
-      if (cls.kind !== 'other') {
-        stopped ??= { kind: cls.kind, reason: cls.reason };
+      if (cls.kind === 'billing') {
+        // A billing or credit error stops the run at once (invariant 79): no
+        // recorded scenario was reviewed, so none goes on to replay, and each
+        // is incomplete with the reason. The traces are in the checkpoint, so
+        // a resume reviews them without re-exploring.
+        stopped = { ...(stopped ?? {}), kind: 'billing', reason: cls.reason, haltedAt: 'critic' };
+        for (const sc of scenarios) incomplete.push({ scenario: sc.name, reason: haltedReason('Critic', cls.reason) });
         cpState.phase = 'reviewing';
         const cpFile = saveCheckpoint();
         opts.onEvent?.({ type: 'message', text: stopMessage(cls.reason, cpFile) });
+        opts.onEvent?.({ type: 'message', text: haltedLine('Critic', scenarios.length) });
+      } else {
+        // The pipeline continues (replay/stability are LLM-free), but a
+        // persistent API failure marks the run stopped so the checkpoint
+        // survives and the resume hint prints.
+        if (cls.kind !== 'other') {
+          stopped ??= { kind: cls.kind, reason: cls.reason };
+          cpState.phase = 'reviewing';
+          const cpFile = saveCheckpoint();
+          opts.onEvent?.({ type: 'message', text: stopMessage(cls.reason, cpFile) });
+        }
+        opts.onEvent?.({ type: 'message', text: `Critic skipped: ${(err as Error).message}` });
       }
-      opts.onEvent?.({ type: 'message', text: `Critic skipped: ${(err as Error).message}` });
     }
   }
 
@@ -1548,6 +1596,9 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // re-recorded traces and the partial attempts (droppedTraces only).
   const repairTraces: { repaired: Scenario[]; attempts: Record<string, TraceStep[]> } = { repaired: [], attempts: {} };
   if (review && !opts.skipCritic) {
+    // The first review's verdicts, marks included (invariant 79): a rework
+    // that listed no required fix still counts in review.repair below.
+    const firstReviewVerdicts = review.verdicts;
     const split = splitGate(scenarios, review.verdicts);
     if (split.rejected.length > 0) {
       opts.onEvent?.({
@@ -1689,8 +1740,15 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       }
       if (decision.run) { opts.onEvent?.(repairDoneEvent(merged.history, repairUsd)); wrongPasswordLine('repair'); }
     }
+    // A first-review rework with no required fix is never sent to repair and
+    // never dropped for it, and it stays in the first-pass rework count: its
+    // review.repair entry is marked, or added with the note (invariant 79).
+    const withMarks = withReworkWithoutFix(firstReviewVerdicts, review.repair);
+    if (withMarks && withMarks.length > 0) review = { ...review, repair: withMarks };
     scenariosForReplay = kept;
   }
+  // Halted at the Critic: nothing goes on (invariant 79).
+  if (stopped?.haltedAt === 'critic') scenariosForReplay = [];
 
   // Step 4 — Reality check (replay). Re-execute every passing scenario in a fresh
   // Playwright context and drop the ones that fail. Survivors are what the
@@ -1765,6 +1823,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
         timeoutMs: opts.replayTimeoutMs,
         stabilize: opts.stabilize,
         stabilizerModel: stageModels.stabilizer,
+        ...(opts.stabilizerClient ? { stabilizerClient: opts.stabilizerClient } : {}),
         maxStabilizeAttempts: opts.maxStabilizeAttempts,
         onEvent: (ev: StabilityEvent) => {
           switch (ev.type) {
@@ -1792,6 +1851,9 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
             case 'scenario_refused':
               opts.onEvent?.({ type: 'stability_scenario_refused', name: ev.name, reason: ev.reason });
               return;
+            case 'scenario_skipped':
+              opts.onEvent?.({ type: 'message', text: stabilitySkipLine(ev.name, ev.reason) });
+              return;
             case 'stability_done':
               opts.onEvent?.({
                 type: 'stability_done',
@@ -1799,6 +1861,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
                 flaked: ev.flaked,
                 recovered: ev.recovered,
                 refused: ev.refused,
+                ...(ev.credentialSafetySkipped > 0 ? { credentialSafetySkipped: ev.credentialSafetySkipped } : {}),
                 iterations: ev.iterations,
                 flakeRate: ev.flakeRate,
                 durationMs: ev.durationMs,
@@ -1841,21 +1904,41 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
           }
         },
       });
-      emittedScenarios = s.emitted;
+      // A wrong-password scenario stability skipped (credential safety) ships
+      // on its replay pass, in its original place (invariant 79).
+      const shipped = new Set([...s.emitted, ...s.skipped]);
+      emittedScenarios = stabilityInput.filter((sc) => shipped.has(sc));
       wrongPasswordLine('stability');
       stabilityInfo = stabilityReportBlock(s);
       if (s.warning) opts.onEvent?.({ type: 'message', text: `WARNING: ${s.warning}` });
     } catch (err) {
-      opts.onEvent?.({ type: 'message', text: `Stability skipped: ${(err as Error).message}` });
-      stabilityInfo = {
-        skipped: true,
-        iterations: opts.stabilityIterations ?? 3,
-        passed: 0,
-        flaked: 0,
-        flakeRate: 0,
-        durationMs: 0,
-        verdicts: [],
-      };
+      if (isBillingError(err)) {
+        // A billing or credit error from the Stabilizer stops the run at once
+        // (invariant 79): no scenario ships unverified, and none is dropped as
+        // broken for a model call that never answered. Every replay survivor
+        // is incomplete with the reason; the verdicts the Critic paid for are
+        // in the checkpoint, so a resume replays and re-runs at $0.
+        const cls = classifyRunError(err);
+        stopped = { ...(stopped ?? {}), kind: 'billing', reason: cls.reason, haltedAt: 'stabilizer' };
+        for (const sc of stabilityInput) incomplete.push({ scenario: sc.name, reason: haltedReason('Stabilizer', cls.reason) });
+        emittedScenarios = [];
+        if (review?.verdicts.length) cpState.verdicts = review.verdicts;
+        cpState.phase = 'reviewing';
+        const cpFile = saveCheckpoint();
+        opts.onEvent?.({ type: 'message', text: stopMessage(cls.reason, cpFile) });
+        opts.onEvent?.({ type: 'message', text: haltedLine('Stabilizer', stabilityInput.length) });
+      } else {
+        opts.onEvent?.({ type: 'message', text: `Stability skipped: ${(err as Error).message}` });
+        stabilityInfo = {
+          skipped: true,
+          iterations: opts.stabilityIterations ?? 3,
+          passed: 0,
+          flaked: 0,
+          flakeRate: 0,
+          durationMs: 0,
+          verdicts: [],
+        };
+      }
     }
   } else if (opts.skipStability) {
     stabilityInfo = {

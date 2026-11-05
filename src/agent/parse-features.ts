@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { costOf } from './pricing.js';
 import { stageModel } from './stage-models.js';
+import { classifyRunError, isBillingError } from './run-errors.js';
+import { stopBeforeRunMessage } from './checkpoint.js';
 
 /**
  * Feature-list parser.
@@ -29,6 +31,8 @@ export interface ParseFeaturesOptions {
   apiKey?: string;
   /** Override the natural-language parser model. */
   model?: string;
+  /** Test seam: a fake model client. Production callers leave it unset. */
+  client?: { messages: { create: (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message> } };
 }
 
 export interface ParseFeaturesResult {
@@ -161,8 +165,16 @@ export async function parseFeatures(opts: ParseFeaturesOptions): Promise<ParseFe
       // The caller can still use the Planner's homepage-inference path.
       return { features: [], method: 'none' };
     }
-    const { features, costUsd } = await parseNaturalLanguage(opts.naturalInput, apiKey, opts.model);
-    return { features, method: 'natural', costUsd };
+    let parsed: { features: string[]; costUsd: number };
+    try {
+      parsed = await parseNaturalLanguage(opts.naturalInput, apiKey, opts.model, opts.client);
+    } catch (err) {
+      // A billing or credit error stops the run with the stop line
+      // (invariant 79), never an empty feature list.
+      if (isBillingError(err)) throw new Error(stopBeforeRunMessage(classifyRunError(err).reason, 'feature parser'));
+      throw err;
+    }
+    return { features: parsed.features, method: 'natural', costUsd: parsed.costUsd };
   }
   return { features: [], method: 'none' };
 }

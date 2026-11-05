@@ -173,7 +173,20 @@ type FillStep = Extract<TraceStep, { kind: 'fill' }>;
 export type WrongPasswordStage = 'explorer' | 'repair' | 'replay' | 'stability' | 'emitted';
 export type WrongPasswordLedger = NonNullable<RunReport['wrongPasswordAttempts']>;
 
-export const WRONG_PASSWORD_CAP_DEFAULT = 10;
+/**
+ * The default cap. Was 10; run 71d739 (D2) locked the dedicated account
+ * with 5 submits under it (explorer 1, replay 1, stability 3). Owner decision,
+ * Nov 3: 3, with no wrong-password scenario in stability and the emitted
+ * login tests in serial order (invariant 79).
+ */
+export const WRONG_PASSWORD_CAP_DEFAULT = 3;
+
+/**
+ * Why stability does not re-run a wrong-password scenario (invariant 79): it
+ * ran once in replay, and every extra submit counts toward the site's
+ * lockout. Recorded as the verdict's skippedReason, never as flaky or stable.
+ */
+export const CREDENTIAL_SAFETY_SKIP_REASON = 'credential safety: wrong-password scenarios run once in replay';
 
 function isPasswordFill(st: FillStep): boolean {
   return st.credential === 'pass' || PASSWORD_FIELD_RE.test(`${st.target.intent} ${JSON.stringify(st.target.arg)}`);
@@ -218,7 +231,7 @@ export function lockoutThreshold(map?: RequirementsMap): number | null {
 
 /**
  * The cap: QA_CORE_WRONG_PASSWORD_CAP when it is a whole number (default
- * 10), lowered to N - 1 when the map states a lockout after N attempts.
+ * 3), lowered to N - 1 when the map states a lockout after N attempts.
  */
 export function wrongPasswordCap(env: NodeJS.ProcessEnv, map?: RequirementsMap): { cap: number; capSource: string } {
   const raw = env.QA_CORE_WRONG_PASSWORD_CAP;

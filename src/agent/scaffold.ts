@@ -8,6 +8,7 @@ import { renderUniqueDataHelper } from './unique-data.js';
 import { renderParseNumberHelper, renderSameValueHelper } from './parse-number.js';
 import { renderAwaitCaptureReadyTs, renderAwaitCaptureReadyJs } from './capture-ready.js';
 import { redactCredentialValues } from './datasets.js';
+import { wrongPasswordScenarios } from './login-order.js';
 import {
   AUTH_ENV_PASS,
   AUTH_ENV_USER,
@@ -674,6 +675,14 @@ The agent scanned the landing page and produced ${pomResult.scenarios} verified 
 `
     : '';
 
+  // A wrong-password test ran once in replay and was never re-run by
+  // stability (invariant 79): the Verification block says so instead of
+  // claiming the re-runs for it.
+  const credentialSkipped = opts.report.stability?.credentialSafetySkipped ?? 0;
+  const credentialSkipLine = credentialSkipped > 0
+    ? `- except ${credentialSkipped} wrong-password test${credentialSkipped === 1 ? '' : 's'}, which ran once in replay and ${credentialSkipped === 1 ? 'was' : 'were'} not re-run by stability (credential safety: every extra failed login counts toward the site's lockout)
+`
+    : '';
   const replayBlock = opts.report.replay && !opts.report.replay.skipped
     ? `## Verification
 
@@ -681,9 +690,15 @@ Every scenario in this framework passed:
 - 1× live exploration (recorded by Opus, verified by Sonnet)
 - 1× independent reality-check replay
 - ${opts.report.stability?.iterations ?? 3}× stability re-runs
-
+${credentialSkipLine}
 Stability flake_rate: ${((opts.report.stability?.flakeRate ?? 0) * 100).toFixed(1)}%
 `
+    : '';
+  // Each suite run submits one failed login per wrong-password test against
+  // the account in .env (invariant 79); the README says so.
+  const wrongTests = wrongPasswordScenarios(opts.report);
+  const wrongPasswordNote = wrongTests.length > 0
+    ? `\nThe wrong-password test${wrongTests.length === 1 ? '' : 's'} (${wrongTests.map((s) => `"${s.name}"`).join(', ')}) submit${wrongTests.length === 1 ? 's' : ''} one failed login per suite run against the account in \`.env\`. ${wrongTests.length === 1 ? 'It runs' : 'They run'} after the happy login in serial mode (\`test.describe.configure({ mode: 'serial' })\`), and only when the happy login passed, so a suite run never adds a failed login to an account that does not sign in. Sites lock an account after a few failed logins: run the suite against a dedicated test account.\n`
     : '';
 
   // Project layout — explicitly reflects the language used.
@@ -743,7 +758,7 @@ Auth-gated tests pull \`QA_CORE_TEST_USER\` / \`QA_CORE_TEST_PASS\` from the env
 cp .env.example .env
 # edit .env with your real values
 \`\`\`
-
+${wrongPasswordNote}
 ${verdictBlock}${replayBlock}
 ## Adding more tests
 

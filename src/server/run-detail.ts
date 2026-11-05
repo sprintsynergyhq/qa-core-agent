@@ -466,7 +466,7 @@ export function buildStages(report: RunReport, artifacts: RunDetailArtifact[], t
   const verify: RunDetailStages['verify'] = {
     status: !rep && !stab ? 'not-applicable' : (rep?.failed ?? 0) > 0 || (stab?.flaked ?? 0) > 0 ? 'warning' : 'done',
     // A scenario the wrong-password cap refused is named apart, never as flaky or dropped by a failure.
-    stat: stab ? `${stab.passed} stable / ${stab.flaked} flaky${(stab.refused ?? 0) > 0 ? ` / ${stab.refused} refused` : ''}` : rep ? `${rep.passed} passed replay / ${rep.failed} dropped${(rep.refused ?? 0) > 0 ? ` / ${rep.refused} refused` : ''}` : 'replay skipped',
+    stat: stab ? `${stab.passed} stable / ${stab.flaked} flaky${(stab.refused ?? 0) > 0 ? ` / ${stab.refused} refused` : ''}${(stab.credentialSafetySkipped ?? 0) > 0 ? ` / ${stab.credentialSafetySkipped} not re-run (credential safety)` : ''}` : rep ? `${rep.passed} passed replay / ${rep.failed} dropped${(rep.refused ?? 0) > 0 ? ` / ${rep.refused} refused` : ''}` : 'replay skipped',
     replay: rep ? { passed: rep.passed, failed: rep.failed, refused: rep.refused ?? null, duration_ms: rep.durationMs, verdicts: rep.verdicts.map((v) => ({ name: v.name, passed: v.passed, refused: v.refused === true, failed_step: v.failedStep ?? null, step_kind: v.stepKind ?? null, error: v.error ?? null, observed: observedOf(v.observed) })) } : null,
     stability: stab ? {
       iterations: stab.iterations, passed: stab.passed, flaked: stab.flaked, flaky: stab.flaky ?? null, broken: stab.broken ?? null, recovered: stab.recovered ?? null, flake_rate: stab.flakeRate, stabilizer_cost_usd: stab.stabilizerCostUsd ?? null,

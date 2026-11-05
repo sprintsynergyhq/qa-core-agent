@@ -9,7 +9,8 @@ import { COMPARE_POLL_TIMEOUT_MS, relationsByVarName } from './replay.js';
 import { sameValuePoll } from './parse-number.js';
 import { captureWaitNeeded } from './capture-ready.js';
 import { deriveDatasets, renderDatasetJson, recordedSelects, type DatasetCase, type DatasetSelect, type FeatureDataset } from './datasets.js';
-import { AUTH_ENV_PASS, AUTH_ENV_USER, envVarForFill, loginFeatureOf, recordedCredentials, stripLeadingLogin, type AuthCredentials } from './auth-emit.js';
+import { AUTH_ENV_PASS, AUTH_ENV_USER, envVarForFill, findHappyLoginScenario, loginFeatureOf, recordedCredentials, stripLeadingLogin, type AuthCredentials } from './auth-emit.js';
+import { LOGIN_SEQUENCE_COMMENT, LOGIN_SEQUENCE_TITLE, SERIAL_MODE_LINE, loginSequence, withWrongPasswordBesideLogin } from './login-order.js';
 import type { RequirementsMap } from './requirements.js';
 import type { Assertion, CaptureSource, GenerateKind, RunReport, Scenario, SelectorRecord, TraceStep } from './trace.js';
 
@@ -107,14 +108,18 @@ export function transcribePOM(opts: POMTranscribeOptions): POMTranscribeResult {
   // The login feature is the happy login's own feature (invariant 70: on
   // Toolshop it is 'account'), 'login' for a report without the marker.
   const loginFeature = loginFeatureOf(opts.authLogin);
+  // A wrong-password test is grouped with the happy login, so the two land
+  // in one spec in serial order (invariant 79); unchanged when there is none.
+  const base = withWrongPasswordBesideLogin(opts.report);
   const report: RunReport = opts.authLogin
     ? {
-        ...opts.report,
-        scenarios: opts.report.scenarios.map((s) =>
+        ...base,
+        scenarios: base.scenarios.map((s) =>
           s.feature === loginFeature ? s : { ...s, steps: stripLeadingLogin(s.steps) },
         ),
       }
-    : opts.report;
+    : base;
+  const happyLogin = findHappyLoginScenario(report);
 
   const ext = report.language;
   const pageGroups = groupScenariosByFeature(report);
@@ -168,6 +173,7 @@ export function transcribePOM(opts: POMTranscribeOptions): POMTranscribeResult {
       authActive: Boolean(opts.authLogin),
       authCreds: opts.authLogin ? recordedCredentials(opts.authLogin) : null,
       loginFeature,
+      happyLogin,
     }));
     specFiles.push(specFile);
     features.push(pc.feature);
@@ -972,7 +978,7 @@ function renderSpec(
   report: RunReport,
   pc: PageClassPlan,
   ext: 'ts' | 'js',
-  extras: { param?: ParamPlan | undefined; authActive?: boolean; authCreds?: AuthCredentials | null; loginFeature?: string } = {},
+  extras: { param?: ParamPlan | undefined; authActive?: boolean; authCreds?: AuthCredentials | null; loginFeature?: string; happyLogin?: Scenario | null } = {},
 ): string {
   // Spec lives at tests/<feature>/<feature>.spec.{ext} — two levels deep from
   // the framework root, so the page-object import path is `../../pages/...`.
@@ -1080,8 +1086,25 @@ function renderSpec(
   out.push(`  });`);
   out.push('');
 
+  // The happy login and every wrong-password test run in one serial block,
+  // the happy login first (invariant 79); null when the spec has none.
+  const sequence = loginSequence(pc.scenarios.filter((sc) => !param?.members.has(sc)), extras.happyLogin ?? null);
   for (const scenario of pc.scenarios) {
     if (param?.members.has(scenario)) continue; // collapsed into the data loop
+    if (sequence && sequence.members.includes(scenario)) {
+      if (scenario !== sequence.anchor) continue;
+      out.push(...LOGIN_SEQUENCE_COMMENT.map((l) => '  ' + l));
+      out.push(`  test.describe(${q(LOGIN_SEQUENCE_TITLE)}, () => {`);
+      out.push(`    ${SERIAL_MODE_LINE}`);
+      out.push('');
+      for (const member of sequence.members) {
+        out.push(...renderScenario(member, pc, ext, creds, report.url).map((l) => '    ' + l));
+        out.push('');
+      }
+      out.push('  });');
+      out.push('');
+      continue;
+    }
     out.push(...renderScenario(scenario, pc, ext, creds, report.url).map((l) => '  ' + l));
     out.push('');
   }

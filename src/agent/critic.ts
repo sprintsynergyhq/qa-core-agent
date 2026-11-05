@@ -31,6 +31,39 @@ export interface ScenarioVerdict {
   fixes?: FixJudgement[];
   /** Repair review only: anything new the Critic noticed. Recorded as notes, never a drop. */
   observations?: string[];
+  /**
+   * Set when the first review returned "rework" with no required fix for
+   * this scenario, a verdict that contradicts itself (invariant 79, run
+   * 71d739 D4): what the one re-ask decided, and the first reasons. The
+   * verdict then carries the re-ask's outcome; the mark keeps the scenario
+   * in the first-pass rework count (review.repair) whatever happened.
+   */
+  reworkWithoutFix?: ReworkWithoutFixMark;
+}
+
+/** What the one re-ask decided for a first-review rework with no required fix. */
+export interface ReworkWithoutFixMark {
+  /**
+   * kept: the re-ask still listed no fix (or returned nothing for it), so the
+   * scenario is kept as pass; retry-pass, retry-rework, retry-reject: the
+   * re-ask's own verdict (a rework then lists at least one fix).
+   */
+  outcome: 'kept' | 'retry-pass' | 'retry-rework' | 'retry-reject';
+  /** The first review's reasons, verbatim. */
+  firstReasons: string[];
+}
+
+/** The note (report and console) on a first-review rework that listed no required fix even after its re-ask. */
+export const REWORK_WITHOUT_FIX_NOTE = 'critic rework without a required fix; kept';
+
+/** A rework verdict's required fixes, empty or whitespace-only entries left out. */
+function liveFixes(v: Pick<ScenarioVerdict, 'required_fixes'>): string[] {
+  return (v.required_fixes ?? []).filter((f) => typeof f === 'string' && f.trim().length > 0);
+}
+
+/** True for a verdict that contradicts itself: rework with no required fix the Explorer could apply. */
+export function isReworkWithoutFix(v: Pick<ScenarioVerdict, 'verdict' | 'required_fixes'>): boolean {
+  return v.verdict === 'rework' && liveFixes(v).length === 0;
 }
 
 /** One required fix of the first verdict, as the repair review judged it. */
@@ -133,7 +166,7 @@ A fill rendered as <credential:user> or <credential:pass> types the run's dedica
 
 5. Volatile values: an assertion or capture pinned to a literal catalogue value or a generated id (a specific price, a specific product name, a literal item count other than 0 for absence, a generated test id like product-01JX8F2K or sku-8842) is "rework": such values rot when the data reseeds. Doctrine rules 2 and 6 below state the durable shape (capture the value from the page, act, assert_compare with a relation; a format; a structural fact; a stable structural id) and the required_fix names that shape in the Explorer's own tool forms: assert with regex (a format: "has text matching /.../"), toHaveCount with atLeast (a minimum: "count>=1"), toBeChecked (a filter state), assert_compare re-reading a second element (the compare line names the element it re-reads) for two-element comparisons, and greater / less on formatted numbers (prices parse). A line already in one of those forms is not volatile.
 
-6. Universal claim in the name (doctrine rule 11 below; cite it as rule 11): ${UNIVERSAL_CLAIM_RULE} A scenario whose name makes such a claim and whose recording holds neither assertion for it is "rework", with a required fix that names the form: "assert allItemsMatch on the item locator (every item, not the first) with text set to the value the scenario typed", or a count-0 absence assertion on the items that must not appear. An "assert every item of ... matches" line is that assertion.
+6. Universal claim in the name (doctrine rule 11 below; cite it as rule 11): ${UNIVERSAL_CLAIM_RULE} A scenario whose name makes an only, all, every or each claim and whose recording holds no all-items assertion for it is "rework", even when a count-0 absence is recorded, with a required fix that names the form: "assert allItemsMatch on the item locator (every item, not the first) with text set to the value the scenario typed or the label of the filter it checked or selected". A none or no claim with neither an all-items nor a count-0 absence assertion on the items that must not appear is "rework", with a required fix naming the count-0 absence. An "assert every item of ... matches" line is that assertion.
 
 ${ASSERTION_DOCTRINE}
 
@@ -221,15 +254,15 @@ export async function critique(opts: {
   const system: Anthropic.TextBlockParam[] = [{ type: 'text', text: CRITIC_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam];
   if (repairFixes) system.push({ type: 'text', text: REPAIR_REVIEW_PROMPT } as Anthropic.TextBlockParam);
 
-  const ask = async (): Promise<{ text: string; costUsd: number }> => {
+  const ask = async (content: string = userMessage, maxTokens?: number): Promise<{ text: string; costUsd: number }> => {
     const response = await client.messages.create({
       model,
-      max_tokens: criticMaxTokens(opts.scenarios.length) + (repairFixes ? REPAIR_REVIEW_EXTRA_TOKENS * opts.scenarios.length : 0),
+      max_tokens: maxTokens ?? criticMaxTokens(opts.scenarios.length) + (repairFixes ? REPAIR_REVIEW_EXTRA_TOKENS * opts.scenarios.length : 0),
       system,
       messages: [
         {
           role: 'user',
-          content: userMessage,
+          content,
         },
       ],
     });
@@ -291,8 +324,61 @@ export async function critique(opts: {
     for (const name of unjudged) warnings.push(`${UNJUDGED_REPAIR_NOTE}: "${name}"`);
   }
 
+  // A first-review rework with no required fix contradicts itself (invariant
+  // 79, run 71d739 D4: two reworks ended their own reasons by calling the
+  // scenario acceptable, and both dropped at the repair stage with nothing
+  // to fix). Those scenarios are asked again ONCE, in the same call style as
+  // the zero-verdict retry, with a message naming the contradiction. A
+  // re-ask that still lists no fix keeps the scenario as pass with
+  // REWORK_WITHOUT_FIX_NOTE: never sent to repair, never dropped for it. The
+  // mark on the verdict keeps it in the first-pass rework count.
+  if (!repairFixes) {
+    const recorded = opts.scenarios.map((s) => s.name);
+    const assigned = assignVerdicts(recorded, parsed);
+    const contradicting = recorded.filter((name) => { const v = assigned.get(name); return v !== undefined && isReworkWithoutFix(v); });
+    if (contradicting.length > 0) {
+      const subset = opts.scenarios.filter((s) => contradicting.includes(s.name));
+      const again = await ask(reworkWithoutFixMessage(subset, opts.url, contradicting.map((n) => assigned.get(n)!)), criticMaxTokens(subset.length));
+      costUsd += again.costUsd;
+      raw = [...(Array.isArray(raw) ? raw : [raw]), again.text];
+      const retryByName = assignVerdicts(contradicting, parseVerdicts(again.text));
+      const replaced = new Map<ScenarioVerdict, ScenarioVerdict>();
+      for (const name of contradicting) {
+        const first = assigned.get(name)!;
+        const r = retryByName.get(name);
+        const mark = (outcome: ReworkWithoutFixMark['outcome']): ReworkWithoutFixMark => ({ outcome, firstReasons: first.reasons });
+        let next: ScenarioVerdict;
+        if (!r || isReworkWithoutFix(r)) {
+          next = { scenario: first.scenario, verdict: 'pass', reasons: first.reasons, required_fixes: [], reworkWithoutFix: mark('kept') };
+          warnings.push(`${REWORK_WITHOUT_FIX_NOTE}: "${name}" (asked again once naming the contradiction; ${r ? 'the re-ask still listed no fix' : 'the re-ask returned no verdict for it'})`);
+        } else {
+          const outcome = r.verdict === 'pass' ? 'retry-pass' : r.verdict === 'reject' ? 'retry-reject' : 'retry-rework';
+          next = { ...r, scenario: first.scenario, reworkWithoutFix: mark(outcome) };
+          warnings.push(`Critic returned rework with no required fix for "${name}"; asked again once naming the contradiction, the re-ask returned ${r.verdict}${r.verdict === 'rework' ? ` with ${liveFixes(r).length} required fix(es)` : ''}.`);
+        }
+        replaced.set(first, next);
+      }
+      parsed = parsed.map((v) => replaced.get(v) ?? v);
+    }
+  }
+
   const completed = completeVerdicts(opts.scenarios, parsed);
   return { verdicts: completed.verdicts, summary: parseSummary(text), costUsd, raw, unreviewed: completed.unreviewed, warnings };
+}
+
+/**
+ * The re-ask for first-review reworks that listed no required fix: the
+ * contradiction named, each scenario's first verdict quoted, then the same
+ * rendering criticUserMessage gives. Exported for the smoke.
+ */
+export function reworkWithoutFixMessage(scenarios: Array<Pick<Scenario, 'name' | 'category' | 'steps'>>, url: string, first: ScenarioVerdict[]): string {
+  const quoted = first.map((v, i) => `  ${i + 1}. "${v.scenario}": verdict "rework", required_fixes [] ; reasons: ${JSON.stringify(v.reasons)}`).join('\n');
+  return `Your previous review returned the verdict "rework" with NO required fix for the scenario(s) below. That contradicts itself: a "rework" is sent back to the Explorer to change something, and with no required fix there is nothing it can change. Review each scenario again and return, for each, either "pass" when nothing needs to change, "rework" with at least one concrete required fix, or "reject".
+
+Your previous verdicts:
+${quoted}
+
+${criticUserMessage(scenarios, url)}`;
 }
 
 /**
@@ -1000,6 +1086,42 @@ export interface RepairHistoryEntry {
    * rework although every listed fix was applied. Notes, never a drop.
    */
   notes?: string[];
+  /**
+   * True when the first review returned this scenario as "rework" with no
+   * required fix (invariant 79). The entry counts in the first-pass rework
+   * rate whatever the re-ask decided, so the rule never lowers the rate.
+   */
+  reworkWithoutFix?: true;
+}
+
+/**
+ * review.repair with every first-review rework that listed no required fix
+ * in it (invariant 79, run 71d739 D4). The bar's first-pass rework rate
+ * counts review.repair entries, so a scenario the re-ask kept as pass (or
+ * turned to pass or reject) still counts as a rework: an existing entry for
+ * it (the re-ask listed fixes and the repair pass took it) is marked, and
+ * any other gets its own entry, outcome kept (dropped for a reject) with the
+ * note. `firstVerdicts` are the review's verdicts before the repair pass
+ * (the marks live there and on the checkpoint). Returns the history
+ * unchanged, or undefined, when no verdict carries the mark.
+ */
+export function withReworkWithoutFix(firstVerdicts: ScenarioVerdict[], history: RepairHistoryEntry[] | undefined): RepairHistoryEntry[] | undefined {
+  const marked = firstVerdicts.filter((v) => v.reworkWithoutFix);
+  if (marked.length === 0) return history;
+  const out = [...(history ?? [])];
+  const byName = assignVerdicts(marked.map((v) => v.scenario), out.map((h) => ({ scenario: h.scenario, verdict: 'rework' as const, reasons: [], required_fixes: [] })));
+  for (const v of marked) {
+    const mark = v.reworkWithoutFix!;
+    const claimed = byName.get(v.scenario);
+    const at = claimed ? out.findIndex((h) => h.scenario === claimed.scenario) : -1;
+    if (at >= 0) {
+      out[at] = { ...out[at]!, reworkWithoutFix: true };
+      continue;
+    }
+    const note = mark.outcome === 'kept' ? REWORK_WITHOUT_FIX_NOTE : `critic rework without a required fix; the re-ask returned ${v.verdict}`;
+    out.push({ scenario: v.scenario, first: 'rework', firstReasons: mark.firstReasons, outcome: v.verdict === 'reject' ? 'dropped' : 'kept', notes: [note], reworkWithoutFix: true });
+  }
+  return out;
 }
 
 /* ─────────────────── repair pass events ─────────────────── */

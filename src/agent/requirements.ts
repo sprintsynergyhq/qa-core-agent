@@ -7,6 +7,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { FEATURE_PATH_TOKENS, tokensFor } from './page-filter.js';
 import { normalizeFeatureName } from './parse-features.js';
 import { maskForDisk } from './credential-leak.js';
+import { classifyRunError, isBillingError } from './run-errors.js';
+import { stopBeforeRunMessage } from './checkpoint.js';
 
 /**
  * Requirements map — SRS ingestion for rule-driven planning.
@@ -251,11 +253,15 @@ export async function buildRequirementsMap(
   try {
     parsed = parseRequirementsResponse(await ask());
   } catch (firstErr) {
+    // A billing or credit error stops the run at once (invariant 79): never
+    // a second call, never folded into "could not extract a map".
+    if (isBillingError(firstErr)) throw new Error(stopBeforeRunMessage(classifyRunError(firstErr).reason, 'requirements map'));
     try {
       parsed = parseRequirementsResponse(
         await ask('Your previous answer was not valid JSON. Return ONLY the JSON object, with no prose and no markdown fence.'),
       );
     } catch (secondErr) {
+      if (isBillingError(secondErr)) throw new Error(stopBeforeRunMessage(classifyRunError(secondErr).reason, 'requirements map'));
       throw new Error(
         `Could not extract a requirements map from the SRS. First attempt: ${(firstErr as Error).message} ` +
           `Retry: ${(secondErr as Error).message}`,

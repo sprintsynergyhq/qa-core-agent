@@ -1,5 +1,5 @@
 import type { Locator } from '@playwright/test';
-import type { TraceStep } from './trace.js';
+import type { SelectorRecord, TraceStep } from './trace.js';
 
 /**
  * The all-items assertion (invariant 77, run 59540f D5).
@@ -21,10 +21,11 @@ import type { TraceStep } from './trace.js';
  * whose failure prints the real list.
  *
  * RULE 7 still applies: the pattern is a value this scenario typed earlier
- * (a fill, or a search term in a navigate URL), compared case-insensitively
- * after escaping, never a literal the model wrote. The tool records the
- * escaped typed value with the 'i' flag, so the recorded pattern is the typed
- * value and nothing else.
+ * (a fill, or a search term in a navigate URL) or the visible label of a
+ * filter it checked or selected (run 71d739 D1: the Hammer category
+ * checkbox), compared case-insensitively after escaping, never a literal the
+ * model wrote. The tool records the escaped value with the 'i' flag, so the
+ * recorded pattern is the typed value or the chosen label and nothing else.
  */
 
 /** Flags every all-items pattern carries: case-insensitive, never g (RegExp.test with g is stateful). */
@@ -134,10 +135,57 @@ export function typedValues(priorSteps: TraceStep[]): string[] {
  * whose escaped form equals the pattern case-insensitively.
  */
 export function typedValueForPattern(pattern: string, priorSteps: TraceStep[]): string | null {
+  return latestMatching(pattern, typedValues(priorSteps));
+}
+
+/**
+ * The visible labels of the filters a scenario chose before this point,
+ * latest last (run 71d739 D1: the Hammer category checkbox): a checkbox or
+ * radio left checked, and a select's chosen option. The label is the one the
+ * tool read off the page when it acted (`label` on the step); a step recorded
+ * before that field reads its locator's own name (a role name, a label or a
+ * text argument), and a select chosen by its label reads that label. A
+ * checkbox unchecked later is no longer chosen. Empty labels are skipped.
+ */
+export function chosenLabels(priorSteps: TraceStep[]): string[] {
+  const out: string[] = [];
+  for (const s of priorSteps) {
+    if (s.kind === 'set_checked') {
+      const label = (s.label ?? locatorName(s.target) ?? '').trim();
+      if (!label) continue;
+      const at = out.findIndex((l) => l.toLowerCase() === label.toLowerCase());
+      if (at >= 0) out.splice(at, 1);
+      if (s.checked) out.push(label);
+    } else if (s.kind === 'select_option') {
+      const label = (s.label ?? (s.by === 'label' ? s.option : '')).trim();
+      if (label) out.push(label);
+    }
+  }
+  return out;
+}
+
+/** The accessible name or text a recorded locator names, or null (a css, test id or xpath names none). */
+function locatorName(t: SelectorRecord): string | null {
+  if (t.level === 'role') return (t.arg as { name?: string }).name ?? null;
+  if (t.level === 'label' || t.level === 'text') return typeof t.arg === 'string' ? t.arg : null;
+  return null;
+}
+
+/**
+ * The value an all-items pattern names, or null: a value the scenario typed
+ * (typedValueForPattern), else the visible label of a filter it checked or
+ * selected (chosenLabels), each compared escaped and case-insensitively.
+ * RULE 7 and the tool both decide through this, so a checked label is
+ * accepted in both places and nowhere else.
+ */
+export function chosenOrTypedValueForPattern(pattern: string, priorSteps: TraceStep[]): string | null {
+  return typedValueForPattern(pattern, priorSteps) ?? latestMatching(pattern, chosenLabels(priorSteps));
+}
+
+function latestMatching(pattern: string, values: string[]): string | null {
   const want = pattern.toLowerCase();
-  const typed = typedValues(priorSteps);
-  for (let i = typed.length - 1; i >= 0; i--) {
-    if (escapeForPattern(typed[i]!).toLowerCase() === want) return typed[i]!;
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (escapeForPattern(values[i]!).toLowerCase() === want) return values[i]!;
   }
   return null;
 }

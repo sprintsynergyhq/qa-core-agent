@@ -25,13 +25,29 @@
  *     dropped keeps the critic stage; an older report with no recorded cause
  *     says so instead of borrowing the first-pass reasons
  *
- * Fixture verdicts only. No live calls. No browser.
+ *   - M (run 71d739 D4, invariant 79): run 8's two first-pass reworks that
+ *     list no required fix, verbatim, through explore() with the real
+ *     critique() behind a fixture client: re-asked once; still no fix, both
+ *     are kept as pass with the note, never sent to repair and never dropped,
+ *     and review.repair still counts them (the first-pass rework rate is not
+ *     lowered); when the re-ask gives the registration a fix it goes to the
+ *     repair pass and its journey is marked.
+ *
+ * Fixture verdicts only. No live calls. Section M drives explore() on a
+ * local page with a scripted Explorer (a browser, no model).
  */
 import { decideRepairPass, splitGate, mergeRepairVerdicts, repairDoneEvent, repairScenarioEvents, verdictMatchesScenario, verdictFor, parseVerdicts, judgeRequiredFixes, critique, repairOutcome, REPAIR_REVIEW_PROMPT, UNJUDGED_REPAIR_NOTE, type ScenarioVerdict, type CriticClient } from '../src/agent/critic.js';
 import type { Scenario } from '../src/agent/trace.js';
 import { reconcile, diagnoseEmptyRun, REPAIR_REASON_NOT_RECORDED } from '../src/agent/reconcile.js';
 import { computeRuleCoverage } from '../src/agent/rule-coverage.js';
-import { repairPlanFor } from '../src/agent/runtime.js';
+import { repairPlanFor, explore, type AgentEvent, type ReviewPaused } from '../src/agent/runtime.js';
+import { REWORK_WITHOUT_FIX_NOTE } from '../src/agent/critic.js';
+import type { PlannedScenario } from '../src/agent/planner.js';
+import type Anthropic from '@anthropic-ai/sdk';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import type { RunReport } from '../src/agent/trace.js';
 
 let pass = 0;
@@ -417,6 +433,139 @@ check('F7. verdictFor finds a scenario\'s verdict through the prefix',
   check('L6. two reworks never claim one planned entry: the second keeps its recorded name', twice.plan[0]!.name === PLANNED && twice.plan[1]!.name === `${RECORDED} (page 2)`, JSON.stringify(twice.plan.map((p) => p.name)));
   const noPlan = repairPlanFor(rework, verdicts, undefined);
   check('L7. no plan in the run: every entry keeps its recorded name', noPlan.plan.map((p) => p.name).join('|') === `${RECORDED}|${OTHER}`);
+}
+
+/* ─── M. run 71d739 D4: a rework with no required fix, through explore() ── */
+{
+  for (const k of Object.keys(process.env)) if (k.startsWith('QA_CORE_TEST_')) delete process.env[k];
+  process.env.ANTHROPIC_API_KEY ??= 'fixture-key-never-sent';
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><html lang="en"><head><title>Shop</title></head><body><main><h1>Shop</h1><p id="note">Welcome</p></main></body></html>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const siteUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-core-repair-pass-m-'));
+  const agentCwd = process.cwd();
+  process.chdir(tmpRoot);
+  // Run 8's two verdicts, verbatim (events.jsonl line 611; diagnosis D4).
+  const CONTACT = 'submitted contact form with valid first name, last name, email (with @), subject, and message';
+  const REGISTRATION = 'completed registration with all required fields filled';
+  const SORT = 'sorted products by price low to high and prices ascended';
+  const contactReasons = [
+    "The email 'jane.doe@example.com' is a hardcoded literal that could conflict with duplicate-email validation on repeated runs (rule 6). However, the contact form typically does not require unique emails, so this is likely acceptable in context.",
+    "The first-name and last-name literals ('Jane', 'Doe') are stable test values, not catalogue IDs, so they are acceptable.",
+    "The success assertion uses '.alert, [data-test=\\'contact-success\\']' — a broad selector. The count=0 on the first-name input is a reasonable proxy for form reset/navigation but is a secondary check.",
+    "The primary concern: the 'contact-form inputs after submit count=0' assertion checks that the form field disappeared (count=0) which is a valid outcome signal for form submission/navigation. The success alert visibility is also a good primary outcome. These together are acceptable.",
+    'Minor: no real issue found after careful review — the scenario is actually acceptable as written.',
+  ];
+  const registrationReasons = [
+    "The first name 'Alex', last name 'Taylor', and other personal detail literals are stable enough, but the DOB '1990-05-15', postal code '12345', house number '42', city 'Springfield', state 'IL', phone '5551234567' are all hardcoded literals that are fine as test data for a registration form.",
+    'The email uses <generated:email> and password uses <generated:password> — correct.',
+    'The URL assertion (/auth/login) after registration is a valid success signal (redirect to login after register).',
+    'However, the timeout of 15000ms is at the cap — acceptable per rule 10.',
+    'Primary concern: the assertion only checks the URL. If registration fails silently and redirects to /auth/login anyway (e.g., a duplicate-email path that happens to navigate), the assertion would still pass. A secondary assertion on a success message or registration-confirmation element would strengthen this, but per rule 9, only signals observed in recordings are required. The URL redirect is the recorded success signal — acceptable.',
+    'Actually on review this scenario passes the doctrine rules as written.',
+  ];
+  const SORT_FIX = 'compare the last card price against the first after the sort';
+  const REG_FIX = 'assert a registration confirmation the recording shows';
+  const plan: PlannedScenario[] = [
+    { name: CONTACT, category: 'happy', rationale: 'r', feature: 'contact' },
+    { name: REGISTRATION, category: 'happy', rationale: 'r', feature: 'account' },
+    { name: SORT, category: 'happy', rationale: 'r', feature: 'catalogue' },
+  ];
+  type Call = { name: string; input: Record<string, unknown> };
+  const record = (name: string, feature: string): Call[] => [
+    { name: 'begin_scenario', input: { name, category: 'happy', feature } },
+    { name: 'navigate', input: { url: siteUrl } },
+    { name: 'assert', input: { type: 'toBeVisible', css: 'h1', intent: 'page heading', timeout: 10000 } },
+    { name: 'end_scenario', input: {} },
+  ];
+  const scripted = (script: Call[]): Anthropic => {
+    let n = 0;
+    return { messages: { create: async () => {
+      const call = script[n++];
+      const usage = { input_tokens: 1000, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+      if (!call) return { usage, content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' };
+      return { usage, content: [{ type: 'tool_use', id: `tu${n}`, name: call.name, input: call.input }], stop_reason: 'tool_use' };
+    } } } as unknown as Anthropic;
+  };
+  const verdictText = (vs: Array<Record<string, unknown>>): string => JSON.stringify(vs) + '\n<summary>s</summary>';
+  const criticWith = (responses: string[]) => {
+    const sent: string[] = [];
+    const client: CriticClient = { messages: { create: async (params) => {
+      sent.push(String(params.messages[0]?.content ?? ''));
+      return { content: [{ type: 'text', text: responses[sent.length - 1] ?? '' }], usage: { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as unknown as Anthropic.Message;
+    } } };
+    return { sent, seam: ((o) => critique({ ...o, client })) as typeof critique };
+  };
+  const firstReview = verdictText([
+    { scenario: CONTACT, verdict: 'rework', reasons: contactReasons, required_fixes: [] },
+    { scenario: REGISTRATION, verdict: 'rework', reasons: registrationReasons, required_fixes: [] },
+    { scenario: SORT, verdict: 'rework', reasons: ['the first card only'], required_fixes: [SORT_FIX] },
+  ]);
+  const runOnce = async (label: string, explorerScript: Call[], critic: typeof critique) => {
+    const events: AgentEvent[] = [];
+    const r = await explore({
+      url: siteUrl, language: 'ts', outDir: path.join(tmpRoot, label), fromPlan: plan,
+      model: 'claude-opus-4-7', maxUsd: 2, skipStability: true, stabilize: false, loginPreflightDone: true,
+      explorerClient: scripted(explorerScript), critique: critic,
+      onEvent: (e) => events.push(e),
+    });
+    if ((r as ReviewPaused).paused) throw new Error('unexpected pause');
+    return { report: r as RunReport, messages: events.filter((e): e is Extract<AgentEvent, { type: 'message' }> => e.type === 'message').map((e) => e.text), events };
+  };
+  try {
+    // The kept path: the re-ask still lists no fix for either.
+    const kept = criticWith([
+      firstReview,
+      verdictText([{ scenario: CONTACT, verdict: 'rework', reasons: contactReasons, required_fixes: [] }, { scenario: REGISTRATION, verdict: 'rework', reasons: registrationReasons, required_fixes: [] }]),
+      verdictText([{ scenario: SORT, verdict: 'pass', reasons: ['fixed'], required_fixes: [], fixes: [{ fix: SORT_FIX, applied: true, reason: 'step 3 compares the last card' }], observations: [] }]),
+    ]);
+    const a = await runOnce('kept', [...record(CONTACT, 'contact'), ...record(REGISTRATION, 'account'), ...record(SORT, 'catalogue'), { name: 'finish', input: { summary: 'three' } }, ...record(SORT, 'catalogue'), { name: 'finish', input: { summary: 'repaired' } }], kept.seam);
+    const decision = a.messages.find((m) => m.startsWith('repair pass:')) ?? '';
+    const started = a.events.find((e) => e.type === 'repair_started') as { count?: number } | undefined;
+    check('M1. the Critic was asked three times: the first review, the one re-ask naming the contradiction, the repair review of the one real rework',
+      kept.sent.length === 3 && kept.sent[1]!.startsWith('Your previous review returned the verdict "rework" with NO required fix') && kept.sent[2]!.includes(SORT) && !kept.sent[2]!.includes(CONTACT), JSON.stringify(kept.sent.map((x) => x.slice(0, 80))));
+    check('M2. neither is sent to repair: the decision funds 1 of 1, the sort only',
+      decision.startsWith('repair pass: 1 of 1 rework scenario(s)') && decision.includes(`repairing: "${SORT}"`) && !decision.includes(CONTACT) && !decision.includes(REGISTRATION) && started?.count === 1, decision);
+    const repairA = a.report.review?.repair ?? [];
+    const hc = repairA.find((h) => h.scenario === CONTACT);
+    const hr = repairA.find((h) => h.scenario === REGISTRATION);
+    check('M3. review.repair holds all three: the sort journey and both kept reworks, marked, with the note and the first reasons verbatim',
+      repairA.length === 3 && repairA.find((h) => h.scenario === SORT)?.second === 'pass'
+      && hc?.outcome === 'kept' && hc.reworkWithoutFix === true && JSON.stringify(hc.notes) === JSON.stringify([REWORK_WITHOUT_FIX_NOTE]) && JSON.stringify(hc.firstReasons) === JSON.stringify(contactReasons)
+      && hr?.outcome === 'kept' && hr.reworkWithoutFix === true && JSON.stringify(hr.firstReasons) === JSON.stringify(registrationReasons), JSON.stringify(repairA));
+    check('M4. the console says it, once per scenario: WARNING: critic rework without a required fix; kept',
+      a.messages.filter((m) => m.startsWith(`WARNING: ${REWORK_WITHOUT_FIX_NOTE}: "`)).length === 2, a.messages.filter((m) => m.includes('without a required fix')).join(' | '));
+    const recA = a.report.reconciliation!;
+    check('M5. never dropped for it: both ship after replay with the sort, the funnel balances with no drop',
+      [CONTACT, REGISTRATION, SORT].every((n) => a.report.scenarios.some((sc) => sc.name === n)) && recA.dropped.length === 0 && recA.balanced, JSON.stringify({ shipped: a.report.scenarios.map((sc) => sc.name), dropped: recA.dropped }));
+    // The bar's measure: review.repair entries over the first review's verdicts.
+    check('M6. the first-pass rework count still reads 3 of 3: the rule never lowers the rate', repairA.length === 3 && (a.report.review?.verdicts.length ?? 0) === 3, String(repairA.length));
+
+    // The retry path: the re-ask passes the contact form and gives the registration a fix.
+    const retry = criticWith([
+      firstReview,
+      verdictText([{ scenario: CONTACT, verdict: 'pass', reasons: ['acceptable as recorded'], required_fixes: [] }, { scenario: REGISTRATION, verdict: 'rework', reasons: ['the URL alone'], required_fixes: [REG_FIX] }]),
+      verdictText([
+        { scenario: REGISTRATION, verdict: 'pass', reasons: ['fixed'], required_fixes: [], fixes: [{ fix: REG_FIX, applied: true, reason: 'step 3' }], observations: [] },
+        { scenario: SORT, verdict: 'pass', reasons: ['fixed'], required_fixes: [], fixes: [{ fix: SORT_FIX, applied: true, reason: 'step 3' }], observations: [] },
+      ]),
+    ]);
+    const b = await runOnce('retry', [...record(CONTACT, 'contact'), ...record(REGISTRATION, 'account'), ...record(SORT, 'catalogue'), { name: 'finish', input: { summary: 'three' } }, ...record(REGISTRATION, 'account'), ...record(SORT, 'catalogue'), { name: 'finish', input: { summary: 'repaired' } }], retry.seam);
+    const decisionB = b.messages.find((m) => m.startsWith('repair pass:')) ?? '';
+    const repairB = b.report.review?.repair ?? [];
+    check('M7. a re-ask that lists a fix sends the registration to the repair pass (2 of 2 funded), the contact form passes',
+      decisionB.startsWith('repair pass: 2 of 2 rework scenario(s)') && decisionB.includes(REGISTRATION) && !decisionB.includes(CONTACT), decisionB);
+    check('M8. its repaired journey is marked, and the contact form keeps an entry with the re-ask\'s outcome: still 3 of 3 in the count',
+      repairB.length === 3 && repairB.find((h) => h.scenario === REGISTRATION)?.reworkWithoutFix === true && repairB.find((h) => h.scenario === REGISTRATION)?.second === 'pass'
+      && JSON.stringify(repairB.find((h) => h.scenario === CONTACT)?.notes) === JSON.stringify(['critic rework without a required fix; the re-ask returned pass']), JSON.stringify(repairB));
+  } finally {
+    process.chdir(agentCwd);
+    server.close();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);

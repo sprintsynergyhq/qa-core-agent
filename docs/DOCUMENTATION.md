@@ -856,7 +856,7 @@ The older spellings `QA_CORE_MODEL_PLANNER`, `QA_CORE_MODEL_EXPLORE`, and `QA_CO
 |---|---|
 | `QA_CORE_TEST_USER_<HOST>` / `QA_CORE_TEST_PASS_<HOST>` | The dedicated test account for one site. HOST is the run's host uppercased, every non-alphanumeric character as `_` (`PRACTICESOFTWARETESTING_COM`). Tried first; a pair with only one half set is reported and never completed from the generic pair. |
 | `QA_CORE_TEST_USER` / `QA_CORE_TEST_PASS` | The generic pair, used when no host pair is set. |
-| `QA_CORE_WRONG_PASSWORD_CAP` | Wrong-password submits against the account per run, across every stage (default 10; a stated lockout after N attempts lowers it to N - 1). |
+| `QA_CORE_WRONG_PASSWORD_CAP` | Wrong-password submits against the account per run, across every stage (default 3; a stated lockout after N attempts lowers it to N - 1). Stability never re-runs a wrong-password scenario, and the emitted framework runs it after the happy login in serial mode. |
 
 The model never types the account: it passes `credential: "user"` or `"pass"` on the fill tool and every stage reads the value from the env. Before the requirements map and the Planner, a login preflight checks the account signs in (`--login-url` names the page when the common paths miss it); a failure stops the run with nothing spent. The console names the variables, never the values, and no value is written to any file under `output/`. `QA_CORE_AUTH_*` and the repo's own `tests/auth.setup.ts` are retired. See CLAUDE.md invariant 70.
 

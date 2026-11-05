@@ -121,6 +121,14 @@ export interface RunMeta {
   flags?: Record<string, unknown>;
   /** Set by the migration for a run moved out of the legacy layout. */
   migratedFrom?: string;
+  /**
+   * 'skipped' when the framework was written without the emitted-spec check
+   * running it (invariant 79), with the reason; absent otherwise. Set from
+   * the report through emittedCheckMeta, the one place the CLI and the
+   * gateway read it.
+   */
+  emittedCheck?: 'skipped';
+  emittedCheckReason?: string;
   writtenAt: string;
 }
 
