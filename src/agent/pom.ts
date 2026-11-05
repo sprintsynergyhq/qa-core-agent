@@ -7,9 +7,10 @@ import { regexLiteral, textExpectation } from './transcriber.js';
 import { allItemsPollLine } from './all-items.js';
 import { COMPARE_POLL_TIMEOUT_MS, relationsByVarName } from './replay.js';
 import { sameValuePoll } from './parse-number.js';
+import { absentCounterReadExpr, usesAbsentCounter } from './absent-counter.js';
 import { captureWaitNeeded } from './capture-ready.js';
 import { deriveDatasets, renderDatasetJson, recordedSelects, type DatasetCase, type DatasetSelect, type FeatureDataset } from './datasets.js';
-import { AUTH_ENV_PASS, AUTH_ENV_USER, envVarForFill, findHappyLoginScenario, loginFeatureOf, recordedCredentials, stripLeadingLogin, type AuthCredentials } from './auth-emit.js';
+import { AUTH_ENV_PASS, AUTH_ENV_USER, envVarForFill, findHappyLoginScenario, loginFeatureOf, recordedCredentials, reportUsesTestAccount, sessionGroups, stripLeadingLogin, type AuthCredentials } from './auth-emit.js';
 import { LOGIN_SEQUENCE_COMMENT, LOGIN_SEQUENCE_TITLE, SERIAL_MODE_LINE, loginSequence, withWrongPasswordBesideLogin } from './login-order.js';
 import type { RequirementsMap } from './requirements.js';
 import type { Assertion, CaptureSource, GenerateKind, RunReport, Scenario, SelectorRecord, TraceStep } from './trace.js';
@@ -89,6 +90,14 @@ export interface POMTranscribeResult {
    * (invariant 77). The caller prints them once.
    */
   datasetNotes: string[];
+  /**
+   * The spec folders whose tests run on the saved storageState session:
+   * every recording of the feature signed in at its start (invariant 80).
+   * Empty without a happy login. scaffold routes them to the session project.
+   */
+  sessionFeatures: string[];
+  /** The recorded (non-login) spec folders that run signed out, as recorded. */
+  signedOutFeatures: string[];
 }
 
 /* ───────────────────────── Entry point ───────────────────────── */
@@ -111,11 +120,16 @@ export function transcribePOM(opts: POMTranscribeOptions): POMTranscribeResult {
   // A wrong-password test is grouped with the happy login, so the two land
   // in one spec in serial order (invariant 79); unchanged when there is none.
   const base = withWrongPasswordBesideLogin(opts.report);
+  // Only a feature whose every recording signed in at its start runs on the
+  // saved session, and only its leading logins are stripped; every other
+  // spec runs signed out with its recorded steps, as its recordings did
+  // (invariant 80, run 71d739 D8f).
+  const session = opts.authLogin ? sessionGroups(groupScenariosByFeature(base), loginFeature, reportUsesTestAccount(base)) : new Set<string>();
   const report: RunReport = opts.authLogin
     ? {
         ...base,
         scenarios: base.scenarios.map((s) =>
-          s.feature === loginFeature ? s : { ...s, steps: stripLeadingLogin(s.steps) },
+          session.has(groupKeyOf(s, base.url)) ? { ...s, steps: stripLeadingLogin(s.steps) } : s,
         ),
       }
     : base;
@@ -171,6 +185,7 @@ export function transcribePOM(opts: POMTranscribeOptions): POMTranscribeResult {
     fs.writeFileSync(specFile, renderSpec(report, pc, ext, {
       param: paramPlans.get(pc.feature),
       authActive: Boolean(opts.authLogin),
+      session: session.has(pc.feature),
       authCreds: opts.authLogin ? recordedCredentials(opts.authLogin) : null,
       loginFeature,
       happyLogin,
@@ -195,6 +210,8 @@ export function transcribePOM(opts: POMTranscribeOptions): POMTranscribeResult {
     features,
     dataFiles,
     datasetNotes,
+    sessionFeatures: pageClasses.filter((pc) => session.has(pc.feature)).map((pc) => pc.specFolder),
+    signedOutFeatures: opts.authLogin ? pageClasses.filter((pc) => pc.feature !== loginFeature && !session.has(pc.feature)).map((pc) => pc.specFolder) : [],
   };
 }
 
@@ -411,6 +428,13 @@ interface ActionMethod {
   signatureKey: string;
 }
 
+/** The group a scenario lands in: its feature tag, lower-cased, else derived from its first URL. */
+function groupKeyOf(scenario: Scenario, reportUrl: string): string {
+  return (scenario.feature && scenario.feature.trim().length > 0)
+    ? scenario.feature.toLowerCase()
+    : deriveFeatureFromUrl(pickPageUrl(scenario, reportUrl), reportUrl);
+}
+
 function groupScenariosByFeature(report: RunReport): PageGroup[] {
   // Prefer the explicit `feature` tag a scenario carries. Fall back to a
   // URL-pathname derivation when none of the scenarios has a feature (this
@@ -419,9 +443,7 @@ function groupScenariosByFeature(report: RunReport): PageGroup[] {
   const groups = new Map<string, PageGroup>();
   for (const scenario of report.scenarios) {
     const url = pickPageUrl(scenario, report.url);
-    const feature = (scenario.feature && scenario.feature.trim().length > 0)
-      ? scenario.feature.toLowerCase()
-      : deriveFeatureFromUrl(url, report.url);
+    const feature = groupKeyOf(scenario, report.url);
     const key = feature;
     const existing = groups.get(key);
     if (existing) {
@@ -978,7 +1000,7 @@ function renderSpec(
   report: RunReport,
   pc: PageClassPlan,
   ext: 'ts' | 'js',
-  extras: { param?: ParamPlan | undefined; authActive?: boolean; authCreds?: AuthCredentials | null; loginFeature?: string; happyLogin?: Scenario | null } = {},
+  extras: { param?: ParamPlan | undefined; authActive?: boolean; session?: boolean; authCreds?: AuthCredentials | null; loginFeature?: string; happyLogin?: Scenario | null } = {},
 ): string {
   // Spec lives at tests/<feature>/<feature>.spec.{ext} — two levels deep from
   // the framework root, so the page-object import path is `../../pages/...`.
@@ -1015,6 +1037,8 @@ function renderSpec(
     const rel = relationsByVarName(sc.steps);
     return sc.steps.some((st) => st.kind === 'capture' && captureWaitNeeded(st, rel));
   });
+  // An absent counter reads "0" through the shipped helpers/absent-counter (invariant 80).
+  const usesCounter = pc.scenarios.some((sc) => usesAbsentCounter(sc.steps));
   // A data loop with error cases asserts each case's own checks through a
   // typed element map (invariant 77), so the TS spec imports the Locator type.
   const paramErrors = param ? param.cases.some((c) => c.expect === 'error') : false;
@@ -1025,6 +1049,7 @@ function renderSpec(
     if (usesNumeric) out.push(`import { parseNumber } from '../../helpers/parse-number';`);
     if (usesSameValue) out.push(`import { sameValue } from '../../helpers/same-value';`);
     if (usesCaptureWait) out.push(`import { awaitCaptureReady } from '../../helpers/assertions';`);
+    if (usesCounter) out.push(`import { readCounterText } from '../../helpers/absent-counter';`);
     if (param) out.push(`import rawCases from '../../data/${pc.feature}.json';`);
   } else {
     out.push(`const { test, expect } = require('@playwright/test');`);
@@ -1033,6 +1058,7 @@ function renderSpec(
     if (usesNumeric) out.push(`const { parseNumber } = require('../../helpers/parse-number');`);
     if (usesSameValue) out.push(`const { sameValue } = require('../../helpers/same-value');`);
     if (usesCaptureWait) out.push(`const { awaitCaptureReady } = require('../../helpers/assertions');`);
+    if (usesCounter) out.push(`const { readCounterText } = require('../../helpers/absent-counter');`);
     if (param) out.push(`const rawCases = require('../../data/${pc.feature}.json');`);
   }
   out.push(``);
@@ -1067,9 +1093,10 @@ function renderSpec(
   }
   out.push('');
   out.push(`  test.beforeEach(async ({ context, page }) => {`);
-  if (authActive && pc.feature !== loginFeature) {
-    // Authenticated specs run on the saved storageState session. Clearing
-    // cookies here would destroy exactly the state the setup project built.
+  if (authActive && extras.session === true) {
+    // A spec whose every recording signed in runs on the saved storageState
+    // session. Clearing cookies here would destroy exactly the state the
+    // setup project built. Every other spec runs signed out (invariant 80).
     out.push(`    // Session comes from playwright/.auth/user.json (the setup project); do not clear it.`);
   } else {
     // Per-test isolation: matches the agent's exploration-time isolation.
@@ -1388,7 +1415,10 @@ function emitStepCall(step: TraceStep, pc: PageClassPlan, handle: string, creds:
       // Capture-and-compare emits inline locators (no page-object field): the
       // read needs .first() for attribute/text and the full multi-match locator
       // for count, neither of which the field handle exposes cleanly.
-      const read = `const ${step.varName} = ${captureRhs(step.source, step.target, step.attribute)}; // captured ${step.source} for compare`;
+      // An absent counter reads "0" through the shipped helpers/absent-counter (invariant 80).
+      const read = step.absentAsZero
+        ? `const ${step.varName} = ${absentCounterReadExpr(emitLocatorCall(step.target.level, step.target.arg, true, step.target.frameChain, step.target.filterText), 'capture')}; // captured text for compare; an absent counter reads "0"`
+        : `const ${step.varName} = ${captureRhs(step.source, step.target, step.attribute)}; // captured ${step.source} for compare`;
       // A count read does not auto-wait, so a capture that races the render
       // reads 0 (run 44cb3d). Wait for the target the way replay does, with
       // replay's own timeout, skipped exactly where replay skips it (absent
@@ -1410,7 +1440,10 @@ function emitStepCall(step: TraceStep, pc: PageClassPlan, handle: string, creds:
       // flakes. expect.poll re-reads until the relation holds or the timeout
       // expires, the web-first wait Playwright already uses for locators.
       // The re-read element is the compare's own target when it named one.
-      const readRhs = captureRhs(step.source, step.readTarget ?? step.target, step.attribute);
+      const readFrom = step.readTarget ?? step.target;
+      const readRhs = step.absentAsZero
+        ? absentCounterReadExpr(emitLocatorCall(readFrom.level, readFrom.arg, true, readFrom.frameChain, readFrom.filterText), 'compare')
+        : captureRhs(step.source, readFrom, step.attribute);
       const pollOpts = `{ timeout: ${COMPARE_POLL_TIMEOUT_MS} }`;
       const lines: string[] = [];
       switch (step.relation) {

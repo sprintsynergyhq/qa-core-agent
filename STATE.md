@@ -767,17 +767,31 @@ using the qa-core-heal evaluation report as the template.
   the first-pass rework rate is never lowered (invariant 79). Locked by
   smoke-critic-parse (T) and smoke-repair-pass (M), with the two verdicts
   verbatim.
-- D5 (run 8): OPEN. A counter absent before the first add cannot be
-  recorded (RULE 9 refuses a count capture, a text capture cannot
-  resolve), so R6 dropped on a fix the page cannot satisfy; RULE 9 also
-  refused a cart row count. Explorer cost per recorded scenario doubled
-  ($0.3413 against $0.1712): 1.48 times the calls per scenario, 1.35
-  times the cost per call. Lock: a badge that renders after the first
-  add; smoke-prompt-cache for history pruning.
-- D6 (run 8): OPEN. Product behavior seen and not recorded as findings:
-  quantity 0 still adds an item, and the Hammer filter empties the list.
-  The repair pass starts a fresh retry count, so one failure in each
-  pass never reaches the cap. Neither is established as a bug yet.
+- D5 (run 8): ADDRESSED (PR #60, engine/run8-cost-findings, not
+  merged). A counter absent before the first add cannot be recorded
+  (RULE 9 refuses a count capture, a text capture cannot resolve), so R6
+  dropped on a fix the page cannot satisfy. Explorer cost per recorded
+  scenario doubled ($0.3413 against $0.1712): 1.48 times the calls per
+  scenario, 1.35 times the cost per call. Now a text capture or compare
+  re-read on a counter target that matches no element reads "0"
+  (absentAsZero, the same reader in the tool, replay and both emitters),
+  and a finished scenario's get_dom bodies and long results leave the
+  history at its boundary, read back through an anchor breakpoint so the
+  cache still serves the history (invariant 80). Locked by
+  smoke-absent-counter and smoke-history-prune. Still open from D5:
+  RULE 9 refusing a cart row count by its quantity inputs.
+- D6 (run 8): ADDRESSED (PR #60, engine/run8-cost-findings, not
+  merged). Product behavior seen and not recorded as findings: quantity
+  0 still adds an item. The repair pass started a fresh retry count, so
+  one failure in each pass never reached the cap. Now the repair starts
+  from the main pass's counts, a compare that does not hold counts toward
+  the same cap, a repair finding is the run's finding (never a repair
+  drop), and the Explorer prompt says to assert the planned outcome as
+  planned when the page contradicts it (invariant 80). Locked by
+  smoke-repair-findings. Neither behavior is established as a bug yet.
+  Case (b), the Hammer filter emptying the list, is not changed here:
+  since PR #59 its "only" claim needs an all-items check, which fails on
+  an empty list, and two failures of that check record a finding.
 - D7 (run 8): ADDRESSED (PR #59, engine/run8-fixes, not merged).
   Attempt 1's page filter printed a billing error as "(deterministic
   fallback)" with no reason (standing rule 2). Now every fallback line
@@ -786,12 +800,23 @@ using the qa-core-heal evaluation report as the template.
   (stop line, no state to resume), and the Critic and the Stabilizer (at
   once: nothing ships unreviewed or unverified) (invariant 79). Locked by
   smoke-page-filter (K) and smoke-billing-stops.
-- D8 (run 8): OPEN, smaller items: (a) rule coverage credits R1 and R12
-  to tests that do not exercise them (the citation check reads the
-  category only); (b) the same-page overlap drop below, seen live; (c) a
-  bound toHaveValue misreads a clamped field; (d) a product name inside
-  a locator is not refused; (e) page-object field names keep the first
-  intent; (f) the shipped specs run signed in, the recordings signed out.
+- D8a (run 8): OPEN, brief first, after run 9. Rule coverage credits R1
+  and R12 to tests that do not exercise them (the citation check reads
+  the category only).
+- D8b (run 8): ADDRESSED (PR #60, engine/run8-cost-findings, not
+  merged). The same-page overlap drop below, seen live (events line 19):
+  the login empty-password negative was merged into the empty-email one
+  on /auth/login. Now the overlap and evidence rules compare only
+  scenarios planned on another page (invariant 80). Locked by
+  smoke-same-page-dedup.
+- D8c to D8e (run 8): OPEN, smaller items: (c) a bound toHaveValue
+  misreads a clamped field; (d) a product name inside a locator is not
+  refused; (e) page-object field names keep the first intent.
+- D8f (run 8): ADDRESSED (PR #60, engine/run8-cost-findings, not
+  merged). The shipped specs ran signed in, the recordings signed out.
+  Now only a feature whose every recording signed in at its start runs on
+  the storageState session; every other spec runs signed out, as
+  recorded (invariant 80). Locked by smoke-signed-out-specs.
 - ADDRESSED (PR #56, engine/probe-planner, not merged): the global
   20-scenario plan cap in planAcrossPages cut without naming what it cut
   (found in PR #53). Now it names every scenario it cuts with its rules
@@ -831,11 +856,13 @@ using the qa-core-heal evaluation report as the template.
   representative's first URL for every case. The emitted-spec check would
   drop such a case; the emitter should carry each case's own expected text
   and page.
-- OPEN (found in PR #56): the cross-page overlap rule (invariant 73) also
-  compares scenarios planned on the same page, so two same-page scenarios
-  with the same rules and names overlapping 0.75 are dropped as a
-  "cross-page duplicate ... kept on <the same page>". The new evidence rule
-  compares other pages only.
+- ADDRESSED (PR #60, engine/run8-cost-findings, not merged) (found in PR
+  #56): the cross-page overlap rule (invariant 73) also compared
+  scenarios planned on the same page, so two same-page scenarios with the
+  same rules and names overlapping 0.75 were dropped as a "cross-page
+  duplicate ... kept on <the same page>". Now the overlap rule compares
+  other pages only, like the evidence rule (invariant 80, run 8 D8b).
+  Locked by smoke-same-page-dedup.
 - Test credentials: superseded Oct 8 by phase item 3 (client-supplied
   account through .env).
 - A login-preflight stop lists as Empty run on the dashboard; the report

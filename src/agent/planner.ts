@@ -6,6 +6,7 @@ import { installEvalShim } from './eval-shim.js';
 import { renderRequirementsBlock, type RequirementsMap, type RequirementRule, type RequirementFeature } from './requirements.js';
 import { citationMismatchReason, scenarioNameKey, REJECTION_RULE_RE } from './rule-coverage.js';
 import type { ReachAction } from './discovery.js';
+import { samePage } from './planned-page.js';
 
 /**
  * Planner — Step 1 of the multi-agent pipeline.
@@ -1695,16 +1696,23 @@ export function dedupeAcrossPages(
   const all: PlannedScenario[] = [...existing];
   const fromIncoming = new Set<PlannedScenario>();
   const dropped: Array<{ scenario: PlannedScenario; duplicateOf: PlannedScenario; basis: CrossPageBasis }> = [];
-  // The evidence rule judges the incoming page only, and only against a
-  // scenario planned on another page (an incoming scenario is never a copy
-  // of one from its own page).
+  // The overlap and evidence rules judge the incoming page only against a
+  // scenario planned on ANOTHER page (invariant 80, run 71d739 D8b): two
+  // scenarios of one page are never merged by them. Run 8 merged the login
+  // empty-password negative into the empty-email one, both on /auth/login
+  // (same rules R12, names overlap 0.80). A scenario of an earlier plan call
+  // whose page is this one (reachedBy page, else its pageUrl) is this page too.
   const evidence = carriesFeature ? { page: page.url, carries: carriesFeature } : undefined;
-  const onOtherPage = (e: PlannedScenario): boolean => fromIncoming.has(e) === false;
+  const onOtherPage = (e: PlannedScenario): boolean => {
+    if (fromIncoming.has(e)) return false;
+    const ePage = e.reachedBy?.pageUrl ?? e.pageUrl;
+    return !(ePage && samePage(ePage, page.url));
+  };
   for (const s of incoming) {
-    // An exact-name match first (the original rule), then the overlap rule,
-    // then the evidence rule.
+    // An exact-name match first (the original rule, any page), then the
+    // overlap rule, then the evidence rule, both on other pages only.
     let idx = all.findIndex((e) => crossPageKey(e) === crossPageKey(s));
-    if (idx < 0) idx = all.findIndex((e) => crossPageDuplicate(s, e) !== null);
+    if (idx < 0) idx = all.findIndex((e) => onOtherPage(e) && crossPageDuplicate(s, e) !== null);
     if (idx < 0 && evidence) idx = all.findIndex((e) => onOtherPage(e) && crossPageDuplicate(s, e, evidence) !== null);
     const basis = idx < 0 ? null : crossPageDuplicate(s, all[idx]!, onOtherPage(all[idx]!) ? evidence : undefined);
     if (idx < 0 || !basis) {

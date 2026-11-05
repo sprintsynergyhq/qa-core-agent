@@ -561,7 +561,8 @@ export function describeStep(step: TraceStep): string {
     }
     case 'capture': {
       const what = step.source === 'attribute' ? `${step.attribute} of ${where(step.target)}` : step.source === 'count' ? `count of ${where(step.target)}` : `text of ${where(step.target)}`;
-      return `capture ${what} -> ${step.varName}`;
+      // An absent counter reads "0" (invariant 80): the badge a clean cart never shows.
+      return `capture ${what} -> ${step.varName}${step.absentAsZero ? ' (the counter was not on the page; an absent counter reads "0")' : ''}`;
     }
     case 'assert_compare': {
       // The poll is what replay and the emitted spec do (expect.poll for
@@ -1092,6 +1093,12 @@ export interface RepairHistoryEntry {
    * rate whatever the re-ask decided, so the rule never lowers the rate.
    */
   reworkWithoutFix?: true;
+  /**
+   * True when the repair pass recorded this rework as a product finding (the
+   * same outcome check failed in the first pass and in the repair, invariant
+   * 80). The funnel counts it under findings, never as a repair drop.
+   */
+  finding?: true;
 }
 
 /**

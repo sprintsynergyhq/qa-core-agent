@@ -170,6 +170,13 @@ export type TraceStep =
       attribute?: string;
       /** Human label the model passed, kept for readable spec comments. */
       intent: string;
+      /**
+       * A text capture on a counter target (a badge, a quantity; RULE 9's
+       * isCounterSelector) that matched no element: it read "0", and replay
+       * and both emitters read an absent counter as "0" too (invariant 80).
+       * Absent on every other capture, which fails loudly when its target is gone.
+       */
+      absentAsZero?: true;
     }
   | {
       /**
@@ -200,6 +207,12 @@ export type TraceStep =
       readTarget?: SelectorRecord;
       /** Fresh, collision-free identifier for the re-read value in the spec. */
       readVar: string;
+      /**
+       * The re-read element is a counter that matched no element while the
+       * tool polled (or the capture read an absent counter as "0"): every
+       * re-read of it reads an absent counter as "0" (invariant 80).
+       */
+      absentAsZero?: true;
       /**
        * Only on the 'unchanged' relation for a value widget (the refactored
        * assert_freeze): after proving the value held, also assert the re-read
@@ -537,6 +550,8 @@ export interface RunReport {
       notes?: string[];
       /** A first-review rework that listed no required fix (invariant 79): counted in the first-pass rework rate whatever its re-ask decided. */
       reworkWithoutFix?: true;
+      /** The repair pass recorded this rework as a product finding (invariant 80); counted under findings. */
+      finding?: true;
     }>;
   };
   /**
